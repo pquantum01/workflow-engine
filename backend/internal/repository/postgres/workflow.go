@@ -62,7 +62,7 @@ func (r *WorkflowRepo) ListByProcessID(ctx context.Context, processID uuid.UUID)
 	}
 	defer rows.Close()
 
-	var results []*model.Workflow
+	results := make([]*model.Workflow, 0)
 	for rows.Next() {
 		w := &model.Workflow{}
 		var smJSON []byte

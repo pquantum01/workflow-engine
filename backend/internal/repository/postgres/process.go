@@ -53,7 +53,7 @@ func (r *ProcessRepo) List(ctx context.Context, offset, limit int) ([]*model.Pro
 	}
 	defer rows.Close()
 
-	var results []*model.Process
+	results := make([]*model.Process, 0)
 	for rows.Next() {
 		p := &model.Process{}
 		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.Version, &p.Status, &p.CreatedAt, &p.UpdatedAt); err != nil {

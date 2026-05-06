@@ -53,7 +53,7 @@ func (r *WorkflowInstanceRepo) ListByProcessInstanceID(ctx context.Context, proc
 	}
 	defer rows.Close()
 
-	var results []*model.WorkflowInstance
+	results := make([]*model.WorkflowInstance, 0)
 	for rows.Next() {
 		wi := &model.WorkflowInstance{}
 		if err := rows.Scan(&wi.ID, &wi.WorkflowID, &wi.ProcessInstanceID, &wi.CurrentState, &wi.Status, &wi.CreatedAt, &wi.UpdatedAt); err != nil {

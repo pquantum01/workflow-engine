@@ -36,7 +36,7 @@ func (r *StateTransitionRepo) ListByWorkflowInstanceID(ctx context.Context, work
 	}
 	defer rows.Close()
 
-	var results []*model.StateTransition
+	results := make([]*model.StateTransition, 0)
 	for rows.Next() {
 		st := &model.StateTransition{}
 		if err := rows.Scan(&st.ID, &st.WorkflowInstanceID, &st.FromState, &st.ToState, &st.TransitionName, &st.TriggeredBy, &st.TriggerType, &st.CreatedAt); err != nil {

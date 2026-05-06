@@ -1,41 +1,48 @@
 # Current Status - Workflow Engine
 
-## Phase: Phase 1 - Backend Foundation (COMPLETE)
+## Phase: Phase 5 - Frontend Operations + Polish (COMPLETE)
 
 ### Completed
-- [x] Requirements documented (Requirement.md)
-- [x] Architecture designed (Architecture.md)
-- [x] Phase 1 spec written (phase1-foundation.md)
-- [x] Go module initialized (`workflow-engine/backend`)
-- [x] Go environment setup (GOPATH, GOBIN, GOROOT in ~/.zshrc)
-- [x] Docker Compose for PostgreSQL (dev on :5432, test on :5433)
-- [x] Makefile for common commands
-- [x] Database migrations (7 tables: process, workflow, task, process_instances, workflow_instances, task_instances, state_transitions)
-- [x] Domain model structs with validation (Process, Workflow, Task, StateMachine, CompletionRule, instances)
-- [x] Repository interfaces (7 interfaces in internal/repository/)
-- [x] PostgreSQL repository implementations (7 repos in internal/repository/postgres/)
-- [x] Structured logging with log/slog (JSON handler)
-- [x] Unit tests for all models (process, workflow, task, state_machine, instances)
-- [x] Integration tests for all repositories (process, workflow, task, instances, state_transitions)
-- [x] Server entry point with health endpoint
+- [x] Phase 1: Backend Foundation
+- [x] Phase 2: Core Engine + Services
+- [x] Phase 3: API Layer + Integration Tests
+- [x] Phase 4: Frontend Setup + Admin Portal
+- [x] Phase 5: Frontend Operations + Polish
+  - [x] Instance TypeScript types (ProcessInstance, WorkflowInstance, TaskInstance, StateTransition, inputs)
+  - [x] API client layer (processInstances, workflowInstances, taskInstances, stateTransitions)
+  - [x] InstanceListPage — table with status chips, Start Process dialog, row click navigation
+  - [x] InstanceDetailPage — process detail with workflow accordion sections
+  - [x] Task actions — Start (pending→in_progress), Complete, Fail buttons per status
+  - [x] Task assignment — Assign popover with username input
+  - [x] Manual transitions — buttons for available transitions from current state, trigger dialog
+  - [x] Audit log — state transition history table per workflow instance (newest first)
+  - [x] Sidebar nav updated — Instances link with PlayArrowIcon
+  - [x] Backend: GET /api/v1/workflow-instances/{id}/transitions endpoint
+  - [x] Backend integration test: TestAPI_StateTransitionsList
+  - [x] Frontend tests: InstanceListPage (4 tests), api-instances (5 tests)
+  - [x] Production build clean (tsc + vite build)
 
-### Next Up: Phase 2 - Core Engine + Services
-- [ ] State machine engine (transition evaluation, guard checks)
-- [ ] Completion rule evaluation (single, all_of, n_of_m, any_of)
-- [ ] Service layer for definitions (Process, Workflow, Task CRUD)
-- [ ] Service layer for instances (start process, complete tasks, trigger transitions)
-- [ ] Parent-child process hierarchy with 1-level enforcement
-- [ ] Unit tests for engine and all services
+### Test Summary
+```
+Backend:
+  workflow-engine/backend/internal/model    — PASS (48 tests)
+  workflow-engine/backend/internal/engine   — PASS (15 tests)
+  workflow-engine/backend/internal/service  — PASS (22 tests)
+  workflow-engine/backend/tests/integration — 17 API integration tests
 
-### Blocked
-- Nothing currently blocked.
+Frontend:
+  src/__tests__/ProcessListPage.test.tsx    — PASS (4 tests)
+  src/__tests__/api-client.test.ts          — PASS (4 tests)
+  src/__tests__/InstanceListPage.test.tsx   — PASS (4 tests)
+  src/__tests__/api-instances.test.ts       — PASS (5 tests)
+```
 
-### How to Run Integration Tests
+### Frontend Commands
 ```bash
-make docker-up                # Start PostgreSQL containers
-make migrate-up               # Apply migrations to dev DB
-make migrate-up-test          # Apply migrations to test DB
-make test-integration         # Run integration tests
+make fe-install    # Install dependencies
+make fe-dev        # Dev server on :3000 (proxies /api to :8080)
+make fe-build      # Production build
+make fe-test       # Run tests
 ```
 
 ### Decisions Log
@@ -48,6 +55,16 @@ make test-integration         # Run integration tests
 | 2026-04-06 | Simplified table names | `process`, `workflow`, `task` for definitions; `_instances` suffix for runtime tables |
 | 2026-04-06 | Interface-based repository pattern | Enables unit testing services without a database |
 | 2026-04-06 | JSONB for state machine definitions | Avoids complex relational modeling for flexible graph structures |
-| 2026-04-06 | 1-level parent-child constraint | Enforced at DB level with CHECK constraint + application-level validation |
+| 2026-04-06 | 1-level parent-child constraint | Enforced at application level in ProcessInstanceService |
 | 2026-04-06 | Spec-driven development | Write specs/docs first, then implement with full test coverage |
 | 2026-04-06 | Module path `workflow-engine/backend` | Short internal module path, no github.com prefix for local packages |
+| 2026-04-06 | Shared testutil mocks | Mock repos in internal/testutil for reuse across engine and service tests |
+| 2026-04-06 | Auto-evaluate engine on task completion | TaskInstanceService triggers engine.Evaluate after marking a task completed |
+| 2026-04-08 | Response helpers in handler package | Avoids import cycle between api and handler packages |
+| 2026-04-08 | Thin handlers, no handler unit tests | Handlers only parse HTTP and call services — business logic tested in service layer |
+| 2026-04-08 | httptest.NewServer for integration tests | Full HTTP request/response cycle against real PostgreSQL |
+| 2026-04-08 | `workflow_engine` schema | All tables in dedicated schema, search_path set on app connection |
+| 2026-04-09 | MUI (Material UI) for frontend | Admin portal UI library — tables, forms, dialogs, Material Design aesthetic |
+| 2026-04-09 | Vite + React 19 + TypeScript | Fast dev server, HMR, modern React with type safety |
+| 2026-04-09 | Vitest + React Testing Library | Fast test runner compatible with Vite, standard React testing |
+| 2026-04-13 | State transitions on WorkflowInstanceService | Added stateTransitionRepo to WorkflowInstanceService for ListTransitions, keeps handler thin |

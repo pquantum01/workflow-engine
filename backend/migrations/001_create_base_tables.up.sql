@@ -1,3 +1,6 @@
+CREATE SCHEMA IF NOT EXISTS workflow_engine;
+SET search_path TO workflow_engine;
+
 -- Process Definitions (templates)
 CREATE TABLE process (
     id              UUID PRIMARY KEY,

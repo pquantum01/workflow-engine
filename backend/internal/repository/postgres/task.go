@@ -53,7 +53,7 @@ func (r *TaskRepo) ListByWorkflowID(ctx context.Context, workflowID uuid.UUID) (
 	}
 	defer rows.Close()
 
-	var results []*model.Task
+	results := make([]*model.Task, 0)
 	for rows.Next() {
 		t := &model.Task{}
 		if err := rows.Scan(&t.ID, &t.WorkflowID, &t.Name, &t.Description, &t.TaskType, &t.CreatedAt, &t.UpdatedAt); err != nil {

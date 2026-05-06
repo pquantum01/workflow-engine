@@ -16,7 +16,7 @@ var testDB *sql.DB
 func TestMain(m *testing.M) {
 	dbURL := os.Getenv("TEST_DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://workflow:workflow@localhost:5433/workflow_engine_test?sslmode=disable"
+		dbURL = "postgres://workflow:workflow@localhost:5433/workflow_engine_test?sslmode=disable&search_path=workflow_engine"
 	}
 
 	var err error

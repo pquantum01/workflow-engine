@@ -20,11 +20,16 @@ workflow-engine/
 - `spec/Requirement.md` — Functional and non-functional requirements
 - `spec/Architecture.md` — System design, data model, API spec, tech stack
 - `spec/Currentstatus.md` — Progress tracking, next steps, decisions log
+- `spec/testDetails.md` — Test details and coverage
 
 ## Development Approach
 - **Spec-driven development**: Document first, then implement.
 - **All code must have tests**: Unit tests + integration tests. No exceptions.
 - **Interface-based design**: Repository layer uses interfaces for testability.
+- **Complexity management**: Keep business logic in services, avoid adding too much abstraction & nesting.
+- **Code quality**: Follow Go best practices, use meaningful variable names, and write clear comments.
+- **Keep it simple**: Avoid over-engineering and unnecessary complexity.
+- **Documentation**: Keep documentation up-to-date with code changes.
 
 ## Tech Stack
 - **Backend**: Go 1.22+, net/http + gorilla/mux, PostgreSQL 16, golang-migrate, testify, log/slog
@@ -33,19 +38,19 @@ workflow-engine/
 
 ## Build & Run Commands
 ```bash
-# Backend
-cd backend && go build ./cmd/server        # Build
-cd backend && go test ./...                 # Run all tests
-cd backend && go test -tags=integration ./tests/integration/...  # Integration tests
+# All commands run from repo root (go.work workspace)
+make build              # Build binary to ./bin/server
+make run                # Build + run server
+make test               # Run unit tests
+make test-integration   # Run integration tests (requires PostgreSQL)
+make docker-up          # Start PostgreSQL containers
+make migrate-up         # Apply migrations
+make migrate-up-test    # Apply migrations to test DB
 
-# Frontend
-cd frontend && npm install                  # Install deps
-cd frontend && npm run dev                  # Dev server
-cd frontend && npm test                     # Run tests
-
-# Infrastructure
-docker-compose up -d                        # Start PostgreSQL
-make migrate-up                             # Run migrations
+# Frontend (later)
+cd frontend && npm install    # Install deps
+cd frontend && npm run dev    # Dev server
+cd frontend && npm test       # Run tests
 ```
 
 ## Conventions

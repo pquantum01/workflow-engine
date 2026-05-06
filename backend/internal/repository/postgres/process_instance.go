@@ -53,7 +53,7 @@ func (r *ProcessInstanceRepo) List(ctx context.Context, offset, limit int) ([]*m
 	}
 	defer rows.Close()
 
-	var results []*model.ProcessInstance
+	results := make([]*model.ProcessInstance, 0)
 	for rows.Next() {
 		pi := &model.ProcessInstance{}
 		if err := rows.Scan(&pi.ID, &pi.ProcessID, &pi.ParentID, &pi.Status, &pi.StartedAt, &pi.CompletedAt, &pi.CreatedAt, &pi.UpdatedAt); err != nil {
@@ -73,7 +73,7 @@ func (r *ProcessInstanceRepo) ListByParentID(ctx context.Context, parentID uuid.
 	}
 	defer rows.Close()
 
-	var results []*model.ProcessInstance
+	results := make([]*model.ProcessInstance, 0)
 	for rows.Next() {
 		pi := &model.ProcessInstance{}
 		if err := rows.Scan(&pi.ID, &pi.ProcessID, &pi.ParentID, &pi.Status, &pi.StartedAt, &pi.CompletedAt, &pi.CreatedAt, &pi.UpdatedAt); err != nil {
