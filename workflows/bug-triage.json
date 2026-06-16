@@ -1,0 +1,38 @@
+{
+  "name": "bug-triage",
+  "version": 1,
+  "description": "Bug report triage and resolution flow with decision branching",
+  "start_state": "reported",
+  "end_state": "resolved",
+  "states": [
+    {
+      "id": "reported",
+      "label": "Reported",
+      "tasks": [
+        { "key": "triage_decision", "label": "Triage Decision", "type": "manual" }
+      ]
+    },
+    {
+      "id": "in_progress",
+      "label": "In Progress",
+      "tasks": [
+        { "key": "fix_bug", "label": "Fix Bug", "type": "manual" }
+      ]
+    },
+    {
+      "id": "resolved",
+      "label": "Resolved",
+      "tasks": []
+    },
+    {
+      "id": "wont_fix",
+      "label": "Won't Fix",
+      "tasks": []
+    }
+  ],
+  "transitions": [
+    { "from_state": "reported", "to_state": "in_progress" },
+    { "from_state": "reported", "to_state": "wont_fix" },
+    { "from_state": "in_progress", "to_state": "resolved" }
+  ]
+}
