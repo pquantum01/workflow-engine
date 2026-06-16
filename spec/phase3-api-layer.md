@@ -1,188 +1,360 @@
-# Phase 3: API Layer + Integration Tests
+# Phase 3 — REST API Layer
 
-## Overview
+## Goal
+Wire HTTP handlers, middleware, webhook dispatcher+worker, and integration tests. After this phase, all backend functionality is usable via curl.
 
-Wire up HTTP handlers using `net/http` + `gorilla/mux`, add middleware (logging, CORS, error recovery), and write integration tests that hit real PostgreSQL.
+---
 
-## Dependencies
-
-```
-github.com/gorilla/mux  — HTTP router with path params
-```
-
-## Package Structure
+## Package Layout
 
 ```
-backend/internal/api/
-├── router.go              # NewRouter() — registers all routes
-├── response.go            # Shared JSON response helpers
-├── handler/
-│   ├── process.go         # Process definition CRUD
-│   ├── workflow.go        # Workflow definition CRUD
-│   ├── task.go            # Task definition CRUD
-│   ├── process_instance.go # Process instance lifecycle
-│   ├── workflow_instance.go # Workflow instance operations
-│   └── task_instance.go   # Task instance operations
-└── middleware/
-    ├── logging.go         # Request/response logging via slog
-    ├── recovery.go        # Panic recovery
-    └── cors.go            # CORS headers
+internal/
+  api/
+    handler/
+      workflow_def.go
+      instance.go
+      task.go
+      admin.go
+      health.go
+    middleware/
+      cors.go
+      logging.go
+      recovery.go
+      requestid.go
+    dto/
+      workflow_def.go
+      instance.go
+      task.go
+    static.go           serves embedded frontend SPA
+    router.go           all route registrations
+  webhook/
+    dispatcher.go       engine.Event → outbox rows (called inside tx)
+    worker.go           background goroutine, retry loop
+    registry.go         webhooks.json loader
+    signer.go           HMAC-SHA256
+    worker_test.go
+    signer_test.go
 ```
 
-## Handler Pattern
+---
 
-All handlers follow the same pattern:
-
-```go
-type ProcessHandler struct {
-    service *service.ProcessService
-    logger  *slog.Logger
-}
-
-func (h *ProcessHandler) Create(w http.ResponseWriter, r *http.Request) {
-    // 1. Parse request body / path params
-    // 2. Call service
-    // 3. Write JSON response (201 for create, 200 for get/update, 204 for delete)
-    // 4. On error: write error JSON with appropriate status code
-}
-```
-
-**Thin handlers** — no business logic, just HTTP parsing and response writing.
-
-## Response Format
-
-### Success
-```json
-{"id": "...", "name": "...", ...}          // single resource
-[{"id": "...", "name": "..."}, ...]        // list
-```
-
-### Error
-```json
-{"error": "human-readable error message"}
-```
-
-## Shared Response Helpers (response.go)
-
-```go
-func writeJSON(w http.ResponseWriter, status int, data any)
-func writeError(w http.ResponseWriter, status int, msg string)
-```
-
-## Error Mapping
-
-| Service Error | HTTP Status |
-|---|---|
-| `repository.ErrNotFound` | 404 Not Found |
-| Validation error (`"validation:"`) | 400 Bad Request |
-| Business rule error (e.g., "cannot update archived") | 409 Conflict |
-| JSON decode error | 400 Bad Request |
-| Invalid UUID in path | 400 Bad Request |
-| Other / unexpected | 500 Internal Server Error |
-
-## Routes (from Architecture.md)
-
-### Process Definitions
-| Method | Path | Handler |
-|---|---|---|
-| POST | `/api/v1/processes` | ProcessHandler.Create |
-| GET | `/api/v1/processes` | ProcessHandler.List |
-| GET | `/api/v1/processes/{id}` | ProcessHandler.GetByID |
-| PUT | `/api/v1/processes/{id}` | ProcessHandler.Update |
-| DELETE | `/api/v1/processes/{id}` | ProcessHandler.Delete |
-
-### Workflow Definitions
-| Method | Path | Handler |
-|---|---|---|
-| POST | `/api/v1/processes/{id}/workflows` | WorkflowHandler.Create |
-| GET | `/api/v1/processes/{id}/workflows` | WorkflowHandler.ListByProcessID |
-| GET | `/api/v1/workflows/{id}` | WorkflowHandler.GetByID |
-| PUT | `/api/v1/workflows/{id}` | WorkflowHandler.Update |
-| DELETE | `/api/v1/workflows/{id}` | WorkflowHandler.Delete |
-
-### Task Definitions
-| Method | Path | Handler |
-|---|---|---|
-| POST | `/api/v1/workflows/{id}/tasks` | TaskHandler.Create |
-| GET | `/api/v1/workflows/{id}/tasks` | TaskHandler.ListByWorkflowID |
-| GET | `/api/v1/tasks/{id}` | TaskHandler.GetByID |
-| PUT | `/api/v1/tasks/{id}` | TaskHandler.Update |
-| DELETE | `/api/v1/tasks/{id}` | TaskHandler.Delete |
-
-### Process Instances
-| Method | Path | Handler |
-|---|---|---|
-| POST | `/api/v1/process-instances` | ProcessInstanceHandler.Start |
-| GET | `/api/v1/process-instances` | ProcessInstanceHandler.List |
-| GET | `/api/v1/process-instances/{id}` | ProcessInstanceHandler.GetByID |
-| POST | `/api/v1/process-instances/{id}/cancel` | ProcessInstanceHandler.Cancel |
-| GET | `/api/v1/process-instances/{id}/children` | ProcessInstanceHandler.ListChildren |
-
-### Workflow Instances
-| Method | Path | Handler |
-|---|---|---|
-| GET | `/api/v1/process-instances/{id}/workflows` | WorkflowInstanceHandler.ListByProcessInstanceID |
-| GET | `/api/v1/workflow-instances/{id}` | WorkflowInstanceHandler.GetByID |
-| POST | `/api/v1/workflow-instances/{id}/transition` | WorkflowInstanceHandler.TriggerTransition |
-
-### Task Instances
-| Method | Path | Handler |
-|---|---|---|
-| GET | `/api/v1/workflow-instances/{id}/tasks` | TaskInstanceHandler.ListByWorkflowInstanceID |
-| GET | `/api/v1/task-instances/{id}` | TaskInstanceHandler.GetByID |
-| PUT | `/api/v1/task-instances/{id}/status` | TaskInstanceHandler.UpdateStatus |
-| PUT | `/api/v1/task-instances/{id}/assign` | TaskInstanceHandler.Assign |
-
-## Middleware
-
-### Logging Middleware
-- Logs every request: method, path, status code, duration
-- Uses `slog` at Info level
-
-### Recovery Middleware
-- Catches panics, logs stack trace, returns 500
-
-### CORS Middleware
-- Allow all origins in dev (configurable later)
-- Allow methods: GET, POST, PUT, DELETE, OPTIONS
-- Allow headers: Content-Type, Authorization
-- Handle preflight OPTIONS
-
-## Router Setup (router.go)
+## Router (`internal/api/router.go`)
 
 ```go
 func NewRouter(
-    processService *service.ProcessService,
-    workflowService *service.WorkflowService,
-    taskService *service.TaskService,
-    processInstanceService *service.ProcessInstanceService,
-    workflowInstanceService *service.WorkflowInstanceService,
-    taskInstanceService *service.TaskInstanceService,
-    logger *slog.Logger,
+    defSvc    *service.WorkflowDefService,
+    instSvc   *service.InstanceService,
+    taskSvc   *service.TaskService,
+    loader    *workflowloader.Loader,
+    log       *slog.Logger,
 ) *mux.Router
 ```
 
-Registers all routes, wraps with middleware chain: Recovery → Logging → CORS → Handler.
+Route table:
+```
+GET    /api/v1/workflow-defs
+GET    /api/v1/workflow-defs/{id}
+POST   /api/v1/admin/reload-defs
+POST   /api/v1/workflow-instances
+GET    /api/v1/workflow-instances
+GET    /api/v1/workflow-instances/{id}
+POST   /api/v1/workflow-instances/{id}/cancel
+DELETE /api/v1/workflow-instances/{id}
+GET    /api/v1/workflow-instances/{id}/tasks
+GET    /api/v1/workflow-instances/{id}/history
+GET    /api/v1/task-instances/{id}
+POST   /api/v1/task-instances/{id}/start
+POST   /api/v1/task-instances/{id}/complete
+GET    /api/v1/task-types
+GET    /healthz
+GET    /readyz
+/*                                        SPA fallback (static.go)
+```
 
-## main.go Updates
+Middleware chain (applied globally): requestID → slog logging → panic recovery → CORS.
 
-Wire up all repos → engine → services → router. Replace the existing `http.NewServeMux()` with the gorilla/mux router.
+---
 
-## Test Plan
+## Middleware
 
-### Unit Tests (handler tests with mock services)
-Not planned — handlers are thin. Service layer is already well-tested.
+**`requestid.go`**: generates UUID per request, injects into context + `X-Request-ID` response header. Logger reads it from context.
 
-### Integration Tests (backend/tests/integration/)
-Full HTTP request → response cycle against real PostgreSQL.
+**`logging.go`**: logs `method`, `path`, `status`, `duration_ms`, `request_id`. Reads status from response writer wrapper.
 
-| Test | What it verifies |
-|---|---|
-| Process CRUD | Create, get, list, update, delete; archived blocks update; only draft deletable |
-| Workflow CRUD | Create under process, list by process, update, delete; archived process blocks create |
-| Task CRUD | Create under workflow, list by workflow, update, delete |
-| Process Instance lifecycle | Start, get, list, cancel cascade, parent-child, grandchild rejection |
-| Workflow Instance | List by process instance, get, trigger transition |
-| Task Instance | List by workflow instance, get, update status, assign, auto-evaluate on completion |
-| Error responses | 404 for missing resources, 400 for bad input, 409 for business rule violations |
-| Middleware | Logging output, CORS headers, panic recovery |
+**`recovery.go`**: catches panic, logs with `slog.Error`, returns `500 INTERNAL`.
+
+**`cors.go`**: reads `CORS_ALLOWED_ORIGINS` env. Handles preflight + CORS headers.
+
+---
+
+## Request / Response DTOs (`internal/api/dto/`)
+
+### Workflow Def
+```go
+// GET /workflow-defs response item
+type WorkflowDefResponse struct {
+    ID          string          `json:"id"`
+    Name        string          `json:"name"`
+    Version     int             `json:"version"`
+    Description string          `json:"description"`
+    Definition  json.RawMessage `json:"definition"`   // full JSONB on detail; nil on list
+    CreatedAt   time.Time       `json:"created_at"`
+    DeletedAt   *time.Time      `json:"deleted_at,omitempty"`
+}
+
+// GET /workflow-defs list response
+type WorkflowDefListResponse struct {
+    Items  []*WorkflowDefResponse `json:"items"`
+    Total  int                    `json:"total"`
+}
+```
+
+### Instance
+```go
+type StartInstanceRequest struct {
+    WorkflowDefID  string         `json:"workflow_def_id" validate:"required,uuid"`
+    CreatedBy      string         `json:"created_by"      validate:"required"`
+    InitialContext map[string]any `json:"initial_context"`
+}
+
+type WorkflowInstanceResponse struct {
+    ID             string          `json:"id"`
+    WorkflowDefID  string          `json:"workflow_def_id"`
+    CurrentStateID string          `json:"current_state_id"`
+    Status         string          `json:"status"`
+    Context        map[string]any  `json:"context"`
+    StartedAt      time.Time       `json:"started_at"`
+    CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+    // on detail endpoint only:
+    Tasks          []*TaskInstanceResponse    `json:"tasks,omitempty"`
+    History        []*StateTransitionResponse `json:"history,omitempty"`
+}
+
+type InstanceListResponse struct {
+    Items  []*WorkflowInstanceResponse `json:"items"`
+    Total  int                         `json:"total"`
+    Limit  int                         `json:"limit"`
+    Offset int                         `json:"offset"`
+}
+```
+
+### Task
+```go
+type CompleteTaskRequest struct {
+    Status      string `json:"status"     validate:"required,oneof=done rejected"`
+    NextState   string `json:"next_state"`
+    CompletedBy string `json:"completed_by"`
+    Outcome     string `json:"outcome"`      // v2 use; persisted if present
+    Data        any    `json:"data"`         // v2 use; persisted if present
+}
+
+type TaskInstanceResponse struct {
+    ID                 string     `json:"id"`
+    WorkflowInstanceID string     `json:"workflow_instance_id"`
+    StateID            string     `json:"state_id"`
+    TaskKey            string     `json:"task_key"`
+    TaskLabel          string     `json:"task_label"`
+    TaskType           string     `json:"task_type"`
+    Status             string     `json:"status"`
+    Outcome            *string    `json:"outcome,omitempty"`
+    CreatedBy          string     `json:"created_by"`
+    CreatedAt          time.Time  `json:"created_at"`
+    CompletedAt        *time.Time `json:"completed_at,omitempty"`
+}
+
+type StateTransitionResponse struct {
+    ID             string    `json:"id"`
+    FromState      string    `json:"from_state"`
+    ToState        string    `json:"to_state"`
+    TransitionedAt time.Time `json:"transitioned_at"`
+}
+```
+
+---
+
+## Error Handling (`internal/api/handler/response.go`)
+
+```go
+type ErrorResponse struct {
+    Error ErrorBody `json:"error"`
+}
+
+type ErrorBody struct {
+    Code    string `json:"code"`
+    Message string `json:"message"`
+    Details any    `json:"details,omitempty"`
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string, details any)
+func writeJSON(w http.ResponseWriter, status int, v any)
+```
+
+Service error → HTTP status mapping:
+```
+service.ErrNotFound          → 404 NOT_FOUND
+service.ErrConflict          → 409 CONFLICT
+service.ErrInstanceTerminal  → 409 INSTANCE_TERMINAL
+service.ErrTaskNotCompletable→ 409 TASK_NOT_COMPLETABLE
+service.ErrInvalidNextState  → 422 INVALID_NEXT_STATE
+validation errors            → 422 VALIDATION_FAILED
+panic (via middleware)       → 500 INTERNAL
+```
+
+Error messages must NOT expose internal stack traces or raw SQL.
+
+---
+
+## Webhook Dispatcher
+
+### Registry (`webhook/registry.go`)
+```go
+type Subscriber struct {
+    URL              string   `json:"url"`
+    Secret           string   `json:"secret"`
+    EventTypes       []string `json:"event_types"`
+    WorkflowDefNames []string `json:"workflow_def_names"` // empty = all
+}
+
+func LoadRegistry(path string) ([]Subscriber, error)
+```
+
+### Dispatcher (`webhook/dispatcher.go`)
+Called inside engine transaction (receives `tx DB`):
+```go
+func Dispatch(ctx context.Context, tx repository.DB, outboxRepo repository.WebhookOutboxRepo,
+    subscribers []Subscriber, events []engine.Event, defName string) error
+```
+Filters subscribers by event type + def name. Creates one outbox row per (subscriber, event) pair.
+
+### Signer (`webhook/signer.go`)
+```go
+func Sign(secret string, body []byte) string  // returns "sha256=<hex>"
+```
+
+### Worker (`webhook/worker.go`)
+```go
+type Worker struct {
+    outboxRepo  repository.WebhookOutboxRepo
+    subscribers []Subscriber
+    client      *http.Client
+    interval    time.Duration
+    maxAttempts int
+    log         *slog.Logger
+}
+
+func (w *Worker) Run(ctx context.Context)   // ticker loop; stops on ctx cancel
+func (w *Worker) Stop(ctx context.Context)  // graceful drain
+```
+
+**Tick logic:**
+1. `SELECT … FOR UPDATE SKIP LOCKED WHERE next_attempt_at <= now() AND delivered_at IS NULL AND failed_at IS NULL LIMIT 20`
+2. For each row: POST to `target_url`, timeout 10s
+3. 2xx → `MarkDelivered`
+4. Non-2xx / error → `IncrementAttempt(nextAttemptAt)` using backoff schedule; if `attempts >= maxAttempts` → `MarkFailed`
+
+**Backoff schedule (attempt → delay before next):**
+1 → 1m, 2 → 5m, 3 → 30m, 4 → 2h, 5 → 12h, 6 → dead
+
+### Worker Tests
+- Successful delivery marks delivered
+- Non-2xx increments attempt + schedules next
+- After maxAttempts marks failed
+- Signer produces correct HMAC
+
+---
+
+## Static SPA Server (`internal/api/static.go`)
+
+```go
+//go:embed ../../webroot
+var webroot embed.FS
+
+func RegisterStatic(r *mux.Router) {
+    // serve /api/* handled by routes above
+    // all other paths: serve from embed, fallback to index.html (SPA routing)
+}
+```
+
+`webroot/` populated during Docker build (copy of `frontend/dist`). In local dev, Vite dev server proxies `/api` → backend; static serving not needed.
+
+---
+
+## Integration Tests (`backend/tests/integration/`)
+
+Test against real Postgres + real HTTP (using `httptest.NewServer`).
+
+**`api_test.go`** covers (each test truncates tables first):
+- `POST /workflow-instances` → 201 + instance in start state
+- `GET /workflow-instances/:id` → includes tasks + history
+- `POST /task-instances/:id/complete` (linear, all done → transition)
+- `POST /task-instances/:id/complete` (rejected → instance cancelled)
+- `POST /task-instances/:id/complete` on cancelled instance → 409
+- `POST /workflow-instances/:id/cancel` → instance cancelled
+- `GET /workflow-defs` → list
+- `POST /admin/reload-defs` → 200 + result
+- `GET /healthz` → 200
+- `GET /readyz` → 200
+- 404 on unknown IDs
+- Validation errors → 422
+
+---
+
+## `main.go` Wire-Up
+
+```go
+func main() {
+    cfg := config.Load()
+    log := config.NewLogger(cfg)
+
+    pool := mustConnectDB(cfg.DatabaseURL)
+    defer pool.Close()
+
+    // repos
+    defRepo  := repository.NewWorkflowDefRepo(pool)
+    instRepo := repository.NewWorkflowInstanceRepo(pool)
+    taskRepo := repository.NewTaskInstanceRepo(pool)
+    transRepo:= repository.NewStateTransitionRepo(pool)
+    outboxRepo:= repository.NewWebhookOutboxRepo(pool)
+
+    // webhook
+    subscribers, _ := webhook.LoadRegistry(cfg.WebhookConfig)
+    worker := webhook.NewWorker(outboxRepo, subscribers, cfg, log)
+
+    // loader
+    loader := workflowloader.New(cfg.WorkflowsDir, defRepo, log)
+    if _, err := loader.Load(ctx); err != nil { os.Exit(1) }  // hard errors
+
+    // engine
+    eng := engine.New(defRepo, instRepo, taskRepo, transRepo, pool, log)
+
+    // services
+    defSvc  := service.NewWorkflowDefService(defRepo, loader, log)
+    instSvc := service.NewInstanceService(eng, instRepo, taskRepo, transRepo, outboxRepo, subscribers, log)
+    taskSvc := service.NewTaskService(eng, taskRepo, outboxRepo, subscribers, log)
+
+    // server
+    r := api.NewRouter(defSvc, instSvc, taskSvc, loader, log)
+    srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r}
+
+    ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer stop()
+
+    go worker.Run(ctx)
+    go srv.ListenAndServe()
+
+    <-ctx.Done()
+    shutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+    srv.Shutdown(shutCtx)
+    worker.Stop(shutCtx)
+}
+```
+
+---
+
+## Exit Criteria
+- [ ] `make test-integration` green (all API tests)
+- [ ] `curl http://localhost:8080/healthz` → 200
+- [ ] Webhook worker delivers to a test receiver (manual verify or integration test with httptest server)
+- [ ] No internal errors leak in error responses (checked in tests)
+- [ ] No `fmt.Println`

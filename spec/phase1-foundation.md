@@ -1,267 +1,254 @@
-# Phase 1: Backend Foundation — Spec
+# Phase 1 — Foundation
 
-## Scope
-Project scaffolding, database migrations, domain models, repository layer with PostgreSQL, and all associated tests.
+## Goal
+Establish the complete data layer: repo scaffold, DB schema + migrations, domain models, repository interfaces + Postgres implementations, integration tests.
+
+No business logic in this phase. No HTTP. No engine.
 
 ---
 
-## 1. Domain Models
+## Deliverables
 
-### 1.1 Process (Definition)
+### 1. Repo Scaffold
+- `go.work` (Go workspace, single module `./backend`)
+- `backend/go.mod` with all Phase 1 deps
+- `docker-compose.yml` (Postgres 16 only, named volumes, healthcheck)
+- `Makefile` with targets: `build`, `run`, `test`, `test-integration`, `docker-up`, `docker-down`, `migrate-up`, `migrate-up-test`, `migrate-down`
+- `.gitignore`
+
+### 2. Migrations
+`backend/migrations/001_create_base_tables.up.sql`:
+- `workflow_def`
+- `workflow_instance`
+- `task_instance`
+- `state_transition`
+
+`backend/migrations/002_webhook_outbox.up.sql`:
+- `webhook_outbox`
+
+All with corresponding `.down.sql` reversal.
+
+See `Architecture.md` for full DDL.
+
+### 3. Domain Models (`backend/internal/model/`)
+
+**`workflow_def.go`**
 ```go
-type Process struct {
+type WorkflowDef struct {
     ID          uuid.UUID
-    Name        string     // required, max 255
-    Description string     // optional
-    Version     int        // default 1, positive
-    Status      string     // draft | active | archived
-    CreatedAt   time.Time
-    UpdatedAt   time.Time
-}
-```
-**Validation rules:**
-- Name must be non-empty, max 255 chars.
-- Status must be one of: `draft`, `active`, `archived`.
-- Version must be >= 1.
-
-### 1.2 Workflow (Definition)
-```go
-type Workflow struct {
-    ID           uuid.UUID
-    ProcessID    uuid.UUID    // required, FK to process
-    Name         string       // required, max 255
-    Description  string       // optional
-    StateMachine StateMachine // required, stored as JSONB
-    SortOrder    int          // default 0
-    CreatedAt    time.Time
-    UpdatedAt    time.Time
-}
-```
-
-### 1.3 StateMachine (embedded JSONB)
-```go
-type StateMachine struct {
-    States         []State      // list of valid states
-    Transitions    []Transition // list of valid transitions
-    InitialState   string       // must reference a state name
-    TerminalStates []string     // must reference state names
-}
-
-type State struct {
-    Name        string            // unique within the machine
+    Name        string
+    Version     int
     Description string
-    Metadata    map[string]string // arbitrary key-value
-}
-
-type Transition struct {
-    Name           string          // unique within the machine
-    FromState      string          // must reference a state name
-    ToState        string          // must reference a state name
-    CompletionRule *CompletionRule // optional — guards the transition
-}
-
-type CompletionRule struct {
-    Type     string   // single | all_of | any_of | n_of_m
-    TaskRefs []string // references to task definition names within the workflow
-    N        int      // only used for n_of_m
-}
-```
-**Validation rules:**
-- InitialState must exist in States.
-- TerminalStates must all exist in States.
-- Transition FromState/ToState must exist in States.
-- State names unique within a machine.
-- Transition names unique within a machine.
-- CompletionRule.Type must be one of: `single`, `all_of`, `any_of`, `n_of_m`.
-- For `n_of_m`: N must be > 0 and <= len(TaskRefs).
-- For `single`: TaskRefs must have exactly 1 element.
-
-### 1.4 Task (Definition)
-```go
-type Task struct {
-    ID          uuid.UUID
-    WorkflowID  uuid.UUID // required, FK to workflow
-    Name        string    // required, max 255
-    Description string    // optional
-    TaskType    string    // manual | automated | approval
+    Definition  WorkflowDefinition  // parsed from JSONB
     CreatedAt   time.Time
-    UpdatedAt   time.Time
+    DeletedAt   *time.Time
 }
-```
-**Validation rules:**
-- Name must be non-empty, max 255 chars.
-- TaskType must be one of: `manual`, `automated`, `approval`.
 
-### 1.5 ProcessInstance
-```go
-type ProcessInstance struct {
-    ID          uuid.UUID
-    ProcessID   uuid.UUID  // FK to process
-    ParentID    *uuid.UUID // nullable, FK to process_instances (1-level only)
-    Status      string     // running | completed | cancelled | failed
-    StartedAt   time.Time
-    CompletedAt *time.Time // nullable
-    CreatedAt   time.Time
-    UpdatedAt   time.Time
+type WorkflowDefinition struct {
+    Name        string
+    Version     int
+    Description string
+    StartState  string
+    EndState    string
+    States      []StateDef
+    Transitions []TransitionDef
 }
-```
-**Validation rules:**
-- Status must be one of: `running`, `completed`, `cancelled`, `failed`.
-- ParentID, if set, must reference a process instance that itself has no parent (1-level rule).
 
-### 1.6 WorkflowInstance
+type StateDef struct {
+    ID    string
+    Label string
+    Tasks []TaskDef
+}
+
+type TaskDef struct {
+    Key   string
+    Label string
+    Type  string
+}
+
+type TransitionDef struct {
+    FromState string
+    ToState   string
+    Trigger   *TransitionTrigger  // nil = no trigger
+}
+
+type TransitionTrigger struct {
+    TaskKey string
+}
+
+func (d *WorkflowDefinition) Validate() (warnings []string, err error)
+func (d *WorkflowDefinition) TransitionMode(stateID string) TransitionMode
+func (d *WorkflowDefinition) OutgoingTransitions(stateID string) []TransitionDef
+func (d *WorkflowDefinition) FindState(stateID string) (*StateDef, bool)
+```
+
+**`workflow_instance.go`**
 ```go
 type WorkflowInstance struct {
-    ID                uuid.UUID
-    WorkflowID        uuid.UUID // FK to workflow
-    ProcessInstanceID uuid.UUID // FK to process_instances
-    CurrentState      string    // must be a valid state in the workflow's state machine
-    Status            string    // active | completed | cancelled
-    CreatedAt         time.Time
-    UpdatedAt         time.Time
+    ID             uuid.UUID
+    WorkflowDefID  uuid.UUID
+    CurrentStateID string
+    Status         InstanceStatus  // active | completed | cancelled
+    Context        map[string]any
+    StartedAt      time.Time
+    CompletedAt    *time.Time
+    DeletedAt      *time.Time
 }
 ```
 
-### 1.7 TaskInstance
+**`task_instance.go`**
 ```go
 type TaskInstance struct {
-    ID                 uuid.UUID
-    TaskID             uuid.UUID  // FK to task
-    WorkflowInstanceID uuid.UUID  // FK to workflow_instances
-    Status             string     // pending | in_progress | completed | skipped | failed
-    AssignedTo         string     // optional
-    CompletedAt        *time.Time // nullable
-    CreatedAt          time.Time
-    UpdatedAt          time.Time
+    ID                  uuid.UUID
+    WorkflowInstanceID  uuid.UUID
+    StateID             string
+    TaskKey             string
+    TaskLabel           string
+    TaskType            string
+    Status              TaskStatus  // new | in_progress | done | rejected | cancelled
+    Outcome             *string
+    Data                []byte      // JSONB
+    CreatedBy           string
+    CreatedAt           time.Time
+    CompletedAt         *time.Time
+    DeletedAt           *time.Time
 }
 ```
 
-### 1.8 StateTransition (audit log)
+**`state_transition.go`**
 ```go
 type StateTransition struct {
     ID                 uuid.UUID
     WorkflowInstanceID uuid.UUID
     FromState          string
     ToState            string
-    TransitionName     string // optional
-    TriggeredBy        string // user ID, agent ID, process ID
-    TriggerType        string // human | ai_agent | rule | process
-    CreatedAt          time.Time
+    TransitionedAt     time.Time
 }
 ```
 
----
+All models have unit tests for constructor helpers and any validation methods.
 
-## 2. Repository Interfaces
+### 4. Repository Interfaces (`backend/internal/repository/interfaces.go`)
 
-Each repository follows the same pattern: interface in `internal/repository/`, implementation in `internal/repository/postgres/`.
-
-### 2.1 ProcessRepository
 ```go
-type ProcessRepository interface {
-    Create(ctx context.Context, process *model.Process) error
-    GetByID(ctx context.Context, id uuid.UUID) (*model.Process, error)
-    List(ctx context.Context, offset, limit int) ([]*model.Process, error)
-    Update(ctx context.Context, process *model.Process) error
-    Delete(ctx context.Context, id uuid.UUID) error
+type DB interface {
+    QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+    Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+    Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
-```
 
-### 2.2 WorkflowRepository
-```go
-type WorkflowRepository interface {
-    Create(ctx context.Context, workflow *model.Workflow) error
-    GetByID(ctx context.Context, id uuid.UUID) (*model.Workflow, error)
-    ListByProcessID(ctx context.Context, processID uuid.UUID) ([]*model.Workflow, error)
-    Update(ctx context.Context, workflow *model.Workflow) error
-    Delete(ctx context.Context, id uuid.UUID) error
+type WorkflowDefRepo interface {
+    Create(ctx context.Context, def *model.WorkflowDef) error
+    GetByID(ctx context.Context, id uuid.UUID) (*model.WorkflowDef, error)
+    GetByNameVersion(ctx context.Context, name string, version int) (*model.WorkflowDef, error)
+    List(ctx context.Context, includeDeleted bool) ([]*model.WorkflowDef, error)
+    SoftDelete(ctx context.Context, id uuid.UUID) error
+    WithTx(tx DB) WorkflowDefRepo
 }
-```
 
-### 2.3 TaskRepository
-```go
-type TaskRepository interface {
-    Create(ctx context.Context, task *model.Task) error
-    GetByID(ctx context.Context, id uuid.UUID) (*model.Task, error)
-    ListByWorkflowID(ctx context.Context, workflowID uuid.UUID) ([]*model.Task, error)
-    Update(ctx context.Context, task *model.Task) error
-    Delete(ctx context.Context, id uuid.UUID) error
-}
-```
-
-### 2.4 ProcessInstanceRepository
-```go
-type ProcessInstanceRepository interface {
-    Create(ctx context.Context, instance *model.ProcessInstance) error
-    GetByID(ctx context.Context, id uuid.UUID) (*model.ProcessInstance, error)
-    List(ctx context.Context, offset, limit int) ([]*model.ProcessInstance, error)
-    ListByParentID(ctx context.Context, parentID uuid.UUID) ([]*model.ProcessInstance, error)
-    Update(ctx context.Context, instance *model.ProcessInstance) error
-}
-```
-
-### 2.5 WorkflowInstanceRepository
-```go
-type WorkflowInstanceRepository interface {
-    Create(ctx context.Context, instance *model.WorkflowInstance) error
+type WorkflowInstanceRepo interface {
+    Create(ctx context.Context, inst *model.WorkflowInstance) error
     GetByID(ctx context.Context, id uuid.UUID) (*model.WorkflowInstance, error)
-    ListByProcessInstanceID(ctx context.Context, processInstanceID uuid.UUID) ([]*model.WorkflowInstance, error)
-    Update(ctx context.Context, instance *model.WorkflowInstance) error
+    GetByIDForUpdate(ctx context.Context, id uuid.UUID, tx DB) (*model.WorkflowInstance, error)
+    List(ctx context.Context, filter InstanceFilter) ([]*model.WorkflowInstance, int, error)
+    UpdateState(ctx context.Context, id uuid.UUID, newStateID string) error
+    UpdateStatus(ctx context.Context, id uuid.UUID, status model.InstanceStatus, completedAt *time.Time) error
+    SoftDelete(ctx context.Context, id uuid.UUID) error
+    WithTx(tx DB) WorkflowInstanceRepo
 }
-```
 
-### 2.6 TaskInstanceRepository
-```go
-type TaskInstanceRepository interface {
-    Create(ctx context.Context, instance *model.TaskInstance) error
+type TaskInstanceRepo interface {
+    BulkCreate(ctx context.Context, tasks []*model.TaskInstance) error
     GetByID(ctx context.Context, id uuid.UUID) (*model.TaskInstance, error)
-    ListByWorkflowInstanceID(ctx context.Context, workflowInstanceID uuid.UUID) ([]*model.TaskInstance, error)
-    Update(ctx context.Context, instance *model.TaskInstance) error
+    ListByInstance(ctx context.Context, instanceID uuid.UUID, statusFilter []model.TaskStatus) ([]*model.TaskInstance, error)
+    ListByInstanceAndState(ctx context.Context, instanceID uuid.UUID, stateID string) ([]*model.TaskInstance, error)
+    UpdateStatus(ctx context.Context, id uuid.UUID, status model.TaskStatus, completedAt *time.Time) error
+    UpdateOutcome(ctx context.Context, id uuid.UUID, outcome string, data []byte) error
+    SoftDelete(ctx context.Context, id uuid.UUID) error
+    WithTx(tx DB) TaskInstanceRepo
+}
+
+type StateTransitionRepo interface {
+    Append(ctx context.Context, t *model.StateTransition) error
+    ListByInstance(ctx context.Context, instanceID uuid.UUID) ([]*model.StateTransition, error)
+    WithTx(tx DB) StateTransitionRepo
+}
+
+type WebhookOutboxRepo interface {
+    BulkInsert(ctx context.Context, rows []*model.WebhookOutboxRow) error
+    ListPending(ctx context.Context, now time.Time, limit int) ([]*model.WebhookOutboxRow, error)
+    MarkDelivered(ctx context.Context, id uuid.UUID) error
+    MarkFailed(ctx context.Context, id uuid.UUID, lastError string) error
+    IncrementAttempt(ctx context.Context, id uuid.UUID, nextAttemptAt time.Time) error
+    WithTx(tx DB) WebhookOutboxRepo
 }
 ```
 
-### 2.7 StateTransitionRepository
+Sentinel errors in `repository/errors.go`:
 ```go
-type StateTransitionRepository interface {
-    Create(ctx context.Context, transition *model.StateTransition) error
-    ListByWorkflowInstanceID(ctx context.Context, workflowInstanceID uuid.UUID) ([]*model.StateTransition, error)
-}
+var ErrNotFound = errors.New("not found")
+var ErrConflict = errors.New("conflict")
 ```
 
-**Error conventions:**
-- `GetByID` returns a sentinel `ErrNotFound` when no row matches.
-- `Delete` returns `ErrNotFound` if the row doesn't exist.
-- Foreign key violations return `ErrForeignKey`.
-- All methods accept `context.Context` for cancellation/timeouts.
+### 5. Postgres Implementations (`backend/internal/repository/`)
+One file per entity (flat, no subfolder). Each struct holds `db DB`, implements interface, `WithTx` returns new instance with tx.
+
+### 6. Integration Tests (`backend/tests/integration/`)
+- `setup_test.go`: DB connection, truncate helper, test main
+- `workflow_def_test.go`: CRUD + soft delete + unique constraint
+- `workflow_instance_test.go`: CRUD + state/status updates + filters + FOR UPDATE
+- `task_instance_test.go`: bulk create + list by instance/state + status updates
+- `state_transition_test.go`: append + list
 
 ---
 
-## 3. Test Plan
-
-### Unit Tests (no database)
-- **Model validation**: Test `Validate()` on each model — valid inputs pass, invalid inputs return descriptive errors.
-- **StateMachine validation**: Duplicate states, missing initial state, invalid transitions, completion rule edge cases.
-
-### Integration Tests (real PostgreSQL via Docker)
-- **Repository CRUD**: For each repository — create, read, list, update, delete.
-- **Foreign key enforcement**: Creating a workflow with nonexistent process_id fails.
-- **Parent-child constraint**: Creating a grandchild process instance fails.
-- **List filtering**: ListByProcessID, ListByWorkflowID, etc. return correct subsets.
-- **ErrNotFound**: GetByID with random UUID returns ErrNotFound.
+## Dependency List (`go.mod`)
+```
+github.com/lib/pq
+github.com/google/uuid
+github.com/golang-migrate/migrate/v4
+github.com/gorilla/mux                  (Phase 3 but declare now)
+github.com/go-playground/validator/v10  (Phase 3 but declare now)
+github.com/stretchr/testify
+```
 
 ---
 
-## 4. Infrastructure
+## Makefile Targets (Phase 1 subset)
+```makefile
+BINARY=./bin/server
+DB_URL=postgres://workflow:workflow@localhost:5432/workflow?sslmode=disable
+TEST_DB_URL=postgres://workflow:workflow@localhost:5432/workflow_test?sslmode=disable
 
-### Docker Compose
-- PostgreSQL 16 on port 5432.
-- Volume for data persistence in local dev.
+build:
+	go build -o $(BINARY) ./backend/cmd/server
 
-### Makefile Targets
-- `make build` — Build the Go binary.
-- `make test` — Run unit tests.
-- `make test-integration` — Run integration tests (requires PostgreSQL).
-- `make migrate-up` — Apply all migrations.
-- `make migrate-down` — Rollback last migration.
-- `make docker-up` — Start Docker Compose services.
-- `make docker-down` — Stop Docker Compose services.
+test:
+	go test ./backend/...
+
+test-integration:
+	DATABASE_URL=$(TEST_DB_URL) go test ./backend/tests/integration/... -v -count=1
+
+docker-up:
+	docker compose up -d postgres
+
+docker-down:
+	docker compose down
+
+migrate-up:
+	migrate -path backend/migrations -database "$(DB_URL)" up
+
+migrate-up-test:
+	migrate -path backend/migrations -database "$(TEST_DB_URL)" up
+
+migrate-down:
+	migrate -path backend/migrations -database "$(DB_URL)" down
+```
+
+---
+
+## Exit Criteria
+- [ ] `make docker-up && make migrate-up && make migrate-up-test` succeeds
+- [ ] `make test` green (model unit tests)
+- [ ] `make test-integration` green (all repo tests)
+- [ ] No `fmt.Println` in any Go file

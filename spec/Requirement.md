@@ -1,117 +1,88 @@
-# Requirements - Workflow Engine
-
-## Overview
-
-A standalone workflow engine (like Jira) that allows users to define processes, workflows, tasks, and state machines with full configurability. Processes run independently with unique IDs and can span days, driven by humans, AI agents, rules, or other processes.
-
-## Core Concepts
-
-### Process Definition
-- A **template** that describes a type of work (e.g., "Bug Triage", "Employee Onboarding").
-- Contains one or more **Workflow Definitions**.
-- Admin-configurable via UI.
-
-### Process Instance
-- A **running instance** of a Process Definition.
-- Has a unique `process_id`.
-- Can run for days/weeks.
-- Many instances can run in parallel.
-- Supports **parent-child** hierarchy (exactly 1 level deep: parent -> children, no grandchildren).
-
-### Workflow Definition
-- Belongs to a Process Definition.
-- Has a **State Machine** defining valid states and transitions.
-- Contains **Task Definitions** that drive state transitions.
-
-### Workflow Instance
-- A running instance of a Workflow Definition, tied to a Process Instance.
-- Tracks current state within its state machine.
-
-### Task Definition
-- Belongs to a Workflow Definition.
-- Configurable completion rules:
-  - **Single task completion** triggers a workflow state transition.
-  - **Multiple tasks** can contribute to a single state transition (all must complete, or N-of-M, etc.).
-
-### Task Instance
-- A running instance of a Task Definition, tied to a Workflow Instance.
-- Has its own status (pending, in_progress, completed, skipped, failed).
-- Can be completed by: human action, AI agent, rule evaluation, or another process.
-
-### State Machine
-- Fully configurable per Workflow Definition.
-- Defines: states, transitions, initial state, terminal states.
-- Transitions can be guarded by task completion rules.
+# Workflow Engine — Requirements
 
 ## Functional Requirements
 
-### FR-1: Process Definition Management
-- FR-1.1: CRUD operations for Process Definitions.
-- FR-1.2: Each Process Definition has a name, description, version, and status (draft/active/archived).
-- FR-1.3: A Process Definition contains one or more Workflow Definitions.
+### Workflow Definitions
+- FR-1: System loads workflow definitions from JSON files in a configurable directory at startup.
+- FR-2: System validates each definition on load; invalid files log an error and do not block server boot.
+- FR-3: Definitions are versioned by `(name, version)`. Same name + version with identical content = no-op. Different content = reject (bump version).
+- FR-4: Definitions are immutable once loaded. Editing = new version.
+- FR-5: Operator can trigger reload via `POST /api/v1/admin/reload-defs` without restarting server.
+- FR-6: Reload response returns `{ loaded, warnings, errors }`.
+- FR-7: Soft-deleted definitions are hidden from default list but preserved in DB.
+- FR-8: Deleting a definition is blocked if active (non-terminal) instances reference it.
 
-### FR-2: Workflow Definition Management
-- FR-2.1: CRUD operations for Workflow Definitions within a Process Definition.
-- FR-2.2: Each Workflow Definition has a name, description, and a State Machine configuration.
-- FR-2.3: A Workflow Definition contains zero or more Task Definitions.
+### Workflow Instances
+- FR-9: Client starts an instance by supplying `workflow_def_id` and `created_by`.
+- FR-10: Starting an instance creates all task instances for the start state.
+- FR-11: Instance has status `active | completed | cancelled`.
+- FR-12: Client can cancel an active instance; all open tasks become `cancelled`.
+- FR-13: Instance stores a `context` JSONB map for accumulated task outputs (v2 use; reserved in v1).
+- FR-14: Instance tracks `current_state_id` (string key into workflow def).
 
-### FR-3: State Machine Configuration
-- FR-3.1: Define states with name and metadata.
-- FR-3.2: Define transitions between states.
-- FR-3.3: Designate initial state and terminal states.
-- FR-3.4: Transitions can have **completion rules** — conditions based on task completions that must be satisfied.
+### State Machine & Transitions
+- FR-15: Engine derives transition mode per state from config shape (linear / task-bound / user-picks). See Architecture.md for semantics.
+- FR-16: Linear state: all tasks done → fire single outgoing transition.
+- FR-17: Task-bound state: completing the bound task fires its edge; sibling tasks cancelled.
+- FR-18: User-picks state (single task, multiple edges, no triggers): caller supplies `next_state` on task completion; engine validates it ∈ outgoing edges.
+- FR-19: Reaching `end_state` sets instance status = `completed`.
+- FR-20: Any task marked `rejected` → instance status = `cancelled`; all open tasks cancelled.
+- FR-21: Every state transition is recorded in `state_transition` (append-only audit log).
 
-### FR-4: Task Definition Management
-- FR-4.1: CRUD operations for Task Definitions within a Workflow Definition.
-- FR-4.2: Each Task Definition has a name, description, and type.
-- FR-4.3: Configure how task completions map to state transitions:
-  - Single task -> triggers transition.
-  - Multiple tasks -> all must complete to trigger transition.
-  - N-of-M tasks -> at least N of M specified tasks must complete.
+### Tasks
+- FR-22: Task instances are spawned when their parent state is entered.
+- FR-23: Task status lifecycle: `new → in_progress → done | rejected | cancelled`.
+- FR-24: `cancelled` is set by engine only (sibling cancel or instance cancel). Not directly settable by client.
+- FR-25: Completing a task on a terminal instance returns `409 INSTANCE_TERMINAL`.
+- FR-26: Completing a task with status `done | rejected` on an already-terminal task returns `409 CONFLICT`.
+- FR-27: Client can mark a task `in_progress` via `POST /task-instances/{id}/start` (optional UI affordance).
+- FR-28: Task instances snapshot `task_label` and `task_type` at spawn (immutable; def version changes don't affect in-flight tasks).
 
-### FR-5: Process Instance Lifecycle
-- FR-5.1: Start a new Process Instance from a Process Definition.
-- FR-5.2: Each instance gets a unique `process_id`.
-- FR-5.3: Run many instances in parallel.
-- FR-5.4: Process instances can span days.
-- FR-5.5: State changes can be triggered by: human, AI agent, rule, or another process.
+### Task Types (v1)
+- FR-29: Four built-in task types: `approval`, `form`, `checklist`, `manual`.
+- FR-30: Unknown task types in a def are rejected at load time.
+- FR-31: `GET /api/v1/task-types` returns the canonical list.
 
-### FR-6: Parent-Child Process Hierarchy
-- FR-6.1: A Process Instance can have child Process Instances.
-- FR-6.2: Maximum 1 level of hierarchy (parent -> children only).
-- FR-6.3: Parent can query status of children.
-- FR-6.4: Child completion can optionally trigger parent state transitions.
+### Webhooks
+- FR-32: System fires webhooks on events: `task.created`, `task.completed`, `task.cancelled`, `state.transitioned`, `instance.started`, `instance.completed`, `instance.cancelled`.
+- FR-33: Webhook subscribers defined in `webhooks.json` (static file, loaded at startup).
+- FR-34: Subscribers can filter by `event_types` and optionally by `workflow_def_name`.
+- FR-35: Webhook delivery uses outbox pattern: event written to DB in same transaction as state change; worker delivers asynchronously with retry.
+- FR-36: Retry schedule: 1m, 5m, 30m, 2h, 12h, dead (6 attempts max, configurable).
+- FR-37: Webhook requests signed with HMAC-SHA256 (`X-Webhook-Signature: sha256=<hex>`).
+- FR-38: Idempotency key on payload: outbox row ID (`X-Webhook-Delivery` header).
 
-### FR-7: Admin Portal (UI)
-- FR-7.1: Configure Process Definitions, Workflow Definitions, Task Definitions, State Machines.
-- FR-7.2: Visual state machine editor.
-- FR-7.3: Kanban-like view to browse running Process Instances.
-- FR-7.4: Filter/search/sort Process Instances.
-- FR-7.5: Drill into a Process Instance to see Workflow and Task status.
+### Observability
+- FR-39: All log output via `log/slog` JSON handler. No `fmt.Println`.
+- FR-40: Request ID middleware injects `request_id` into every request log entry.
+- FR-41: `GET /healthz` returns `200 OK`.
+- FR-42: `GET /readyz` returns `200 OK` when DB ping succeeds, `503` otherwise.
+
+---
 
 ## Non-Functional Requirements
 
-### NFR-1: Performance
-- Support 1000+ concurrent Process Instances.
-- API response time < 200ms for standard operations.
+- NFR-1: **Simplicity** — no unnecessary abstraction. Business logic in services; handlers thin. No global state beyond DI root.
+- NFR-2: **Testability** — every package has unit tests. Integration tests hit real Postgres. E2e tests use Playwright + Chrome.
+- NFR-3: **Correctness** — concurrent task completions on the same instance serialized via `SELECT FOR UPDATE` on the instance row.
+- NFR-4: **Extensibility** — multi-edge conditions (v2), parallel child workflows (v2), user/auth system (v2), Prometheus metrics (v2) are extension points, not retrofits.
+- NFR-5: **Durability** — webhook delivery survives server crash (outbox pattern).
+- NFR-6: **Single-tenant** — no auth/multi-tenancy in v1. Trusted network assumed.
+- NFR-7: **Single binary + single port** — backend serves both API and embedded frontend SPA. One container, port 8080.
+- NFR-8: **Postgres 16** only. No other DB target in v1.
 
-### NFR-2: Reliability
-- State transitions must be atomic and consistent.
-- No data loss on crashes (persistent storage).
+---
 
-### NFR-3: Testability
-- All backend packages must have unit tests.
-- Integration tests for API endpoints and state machine transitions.
-- Frontend components must have unit tests.
+## Out of Scope (v1)
 
-### NFR-4: Extensibility
-- Plugin-friendly architecture for custom task executors.
-- Webhook support for external integrations.
-
-## API Actors
-
-| Actor | Description |
-|-------|-------------|
-| Admin | Configures Process/Workflow/Task Definitions and State Machines |
-| Operator | Starts Process Instances, monitors progress, acts on tasks |
-| System | AI agents, rules, or other processes that trigger state changes |
+- Authentication / authorization
+- Multi-tenant isolation
+- Rule engine / computed conditions on transitions
+- Parallel child workflow instances (fork/join)
+- Task assignment to specific users
+- User/people registry
+- Dynamic workflow definition upload via UI
+- Prometheus metrics / distributed tracing
+- Workflow versioning migration (auto-upgrade running instances to new version)
+- Scheduled / timed task auto-completion
+- Task type `form` and `checklist` full schema-driven rendering (v1 = stub)

@@ -1,0 +1,33 @@
+{
+  "name": "leave-approval",
+  "version": 1,
+  "description": "Employee leave request approval flow",
+  "start_state": "submitted",
+  "end_state": "approved",
+  "states": [
+    {
+      "id": "submitted",
+      "label": "Submitted",
+      "tasks": [
+        { "key": "manager_review", "label": "Manager Review", "type": "approval" }
+      ]
+    },
+    {
+      "id": "hr_review",
+      "label": "HR Review",
+      "tasks": [
+        { "key": "hr_check", "label": "HR Verification", "type": "approval" },
+        { "key": "policy_check", "label": "Policy Compliance", "type": "checklist" }
+      ]
+    },
+    {
+      "id": "approved",
+      "label": "Approved",
+      "tasks": []
+    }
+  ],
+  "transitions": [
+    { "from_state": "submitted", "to_state": "hr_review" },
+    { "from_state": "hr_review", "to_state": "approved" }
+  ]
+}

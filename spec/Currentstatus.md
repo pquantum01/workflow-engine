@@ -1,70 +1,105 @@
-# Current Status - Workflow Engine
+# Current Status
 
-## Phase: Phase 5 - Frontend Operations + Polish (COMPLETE)
+## Phase Progress
 
-### Completed
-- [x] Phase 1: Backend Foundation
-- [x] Phase 2: Core Engine + Services
-- [x] Phase 3: API Layer + Integration Tests
-- [x] Phase 4: Frontend Setup + Admin Portal
-- [x] Phase 5: Frontend Operations + Polish
-  - [x] Instance TypeScript types (ProcessInstance, WorkflowInstance, TaskInstance, StateTransition, inputs)
-  - [x] API client layer (processInstances, workflowInstances, taskInstances, stateTransitions)
-  - [x] InstanceListPage — table with status chips, Start Process dialog, row click navigation
-  - [x] InstanceDetailPage — process detail with workflow accordion sections
-  - [x] Task actions — Start (pending→in_progress), Complete, Fail buttons per status
-  - [x] Task assignment — Assign popover with username input
-  - [x] Manual transitions — buttons for available transitions from current state, trigger dialog
-  - [x] Audit log — state transition history table per workflow instance (newest first)
-  - [x] Sidebar nav updated — Instances link with PlayArrowIcon
-  - [x] Backend: GET /api/v1/workflow-instances/{id}/transitions endpoint
-  - [x] Backend integration test: TestAPI_StateTransitionsList
-  - [x] Frontend tests: InstanceListPage (4 tests), api-instances (5 tests)
-  - [x] Production build clean (tsc + vite build)
+| Phase | Name | Status | Notes |
+|-------|------|--------|-------|
+| 0 | Spec docs | ✅ Complete | All spec docs written |
+| 1 | Foundation | ✅ Complete | Repo scaffold, DB schema, models, repos, integration tests |
+| 2 | Engine + Services | ✅ Complete | Workflow loader, service layer, state machine engine |
+| 3 | REST API | ✅ Complete | HTTP router, handlers, middleware, webhook dispatcher |
+| 4 | Frontend Admin | ✅ Complete | React scaffold, workflow def list/detail, state graph viz |
+| 5 | Frontend Ops | ✅ Complete | Start instance, task completion, live graph, admin reload |
+| 6 | Polish & Deploy | ✅ Complete | Dockerfile, docker-compose, graceful shutdown, smoke + e2e |
 
-### Test Summary
-```
-Backend:
-  workflow-engine/backend/internal/model    — PASS (48 tests)
-  workflow-engine/backend/internal/engine   — PASS (15 tests)
-  workflow-engine/backend/internal/service  — PASS (22 tests)
-  workflow-engine/backend/tests/integration — 17 API integration tests
+## Exit Criteria Per Phase
 
-Frontend:
-  src/__tests__/ProcessListPage.test.tsx    — PASS (4 tests)
-  src/__tests__/api-client.test.ts          — PASS (4 tests)
-  src/__tests__/InstanceListPage.test.tsx   — PASS (4 tests)
-  src/__tests__/api-instances.test.ts       — PASS (5 tests)
-```
+### Phase 1
+- [ ] `go.work` workspace + `backend/go.mod` with all deps
+- [ ] `docker-compose.yml` (postgres only for dev)
+- [ ] All migrations applied cleanly (`001_create_base_tables`, `002_webhook_outbox`)
+- [ ] All domain models in `internal/model/` with unit tests
+- [ ] Repository interfaces in `internal/repository/interfaces.go`
+- [ ] All Postgres repo implementations with integration tests green
+- [ ] `make test` passes (unit)
+- [ ] `make test-integration` passes (requires postgres)
 
-### Frontend Commands
-```bash
-make fe-install    # Install dependencies
-make fe-dev        # Dev server on :3000 (proxies /api to :8080)
-make fe-build      # Production build
-make fe-test       # Run tests
-```
+### Phase 2
+- [ ] Workflow loader scans `./workflows/*.json`, validates, upserts
+- [ ] Loader unit tests (valid + each error case)
+- [ ] Service layer: `WorkflowDefService`, `InstanceService`, `TaskService`
+- [ ] Engine: all three transition modes (linear, task-bound, user-picks)
+- [ ] Engine: rejection → instance cancel
+- [ ] Engine: `SELECT FOR UPDATE` concurrency guard
+- [ ] Engine unit tests (mock repos, all branching paths)
+- [ ] Service unit tests
+- [ ] `make test` green
 
-### Decisions Log
-| Date | Decision | Rationale |
-|------|----------|-----------|
-| 2026-04-06 | PostgreSQL for storage | JSONB for flexible state machine config, strong consistency for state transitions |
-| 2026-04-06 | net/http + gorilla/mux for routing | Standard library server with mux for path params and route matching |
-| 2026-04-06 | log/slog for structured logging | Pluggable handlers allow integration with Loggly, Datadog, etc. No fmt logging |
-| 2026-04-06 | Backend-first development | Complete and test all backend APIs before starting frontend |
-| 2026-04-06 | Simplified table names | `process`, `workflow`, `task` for definitions; `_instances` suffix for runtime tables |
-| 2026-04-06 | Interface-based repository pattern | Enables unit testing services without a database |
-| 2026-04-06 | JSONB for state machine definitions | Avoids complex relational modeling for flexible graph structures |
-| 2026-04-06 | 1-level parent-child constraint | Enforced at application level in ProcessInstanceService |
-| 2026-04-06 | Spec-driven development | Write specs/docs first, then implement with full test coverage |
-| 2026-04-06 | Module path `workflow-engine/backend` | Short internal module path, no github.com prefix for local packages |
-| 2026-04-06 | Shared testutil mocks | Mock repos in internal/testutil for reuse across engine and service tests |
-| 2026-04-06 | Auto-evaluate engine on task completion | TaskInstanceService triggers engine.Evaluate after marking a task completed |
-| 2026-04-08 | Response helpers in handler package | Avoids import cycle between api and handler packages |
-| 2026-04-08 | Thin handlers, no handler unit tests | Handlers only parse HTTP and call services — business logic tested in service layer |
-| 2026-04-08 | httptest.NewServer for integration tests | Full HTTP request/response cycle against real PostgreSQL |
-| 2026-04-08 | `workflow_engine` schema | All tables in dedicated schema, search_path set on app connection |
-| 2026-04-09 | MUI (Material UI) for frontend | Admin portal UI library — tables, forms, dialogs, Material Design aesthetic |
-| 2026-04-09 | Vite + React 19 + TypeScript | Fast dev server, HMR, modern React with type safety |
-| 2026-04-09 | Vitest + React Testing Library | Fast test runner compatible with Vite, standard React testing |
-| 2026-04-13 | State transitions on WorkflowInstanceService | Added stateTransitionRepo to WorkflowInstanceService for ListTransitions, keeps handler thin |
+### Phase 3
+- [ ] All endpoints from Architecture.md implemented
+- [ ] Middleware: CORS, request-id, slog request log, panic recovery
+- [ ] Webhook outbox dispatcher + worker + HMAC signer
+- [ ] Integration tests: all endpoints, all error paths
+- [ ] `POST /admin/reload-defs` returns warnings
+- [ ] `GET /healthz` + `GET /readyz` work
+- [ ] `make test-integration` green
+
+### Phase 4
+- [ ] React + Vite + TS + Tailwind + shadcn/ui scaffold
+- [ ] API client (`src/api/client.ts` + resource modules)
+- [ ] Layout shell (topbar, sidebar, routing)
+- [ ] `/workflow-defs` list page (table default, card toggle)
+- [ ] `/workflow-defs/:id` detail page with React Flow graph
+- [ ] Dagre LR auto-layout, start/end node styling
+- [ ] Warning banner for def warnings
+- [ ] Vitest + RTL tests
+- [ ] Dark/light theme toggle
+- [ ] `npm test` green
+
+### Phase 5
+- [ ] `/workflow-instances` list + filters
+- [ ] `/workflow-instances/new` start form (def picker, created_by, initial_context KV editor)
+- [ ] `/workflow-instances/:id` detail (live graph, task panel, history timeline)
+- [ ] `/task-instances/:id` standalone deep-link page
+- [ ] Task renderer registry (approval, form stub, checklist stub, manual)
+- [ ] Decision-state next-state dropdown on task card
+- [ ] Polling: 5s active instance, 15s list
+- [ ] Optimistic task complete with rollback
+- [ ] `/admin/reload` page
+- [ ] `npm test` green
+
+### Phase 6
+- [x] Backend Dockerfile (3 stages: node, go, alpine)
+- [x] `docker-compose.full.yml` full stack; `docker-compose.yml` dev (postgres only)
+- [x] Graceful shutdown (SIGTERM → drain HTTP, stop webhook worker)
+- [x] `tests/smoke/smoke.sh` passes (verified locally)
+- [x] Playwright e2e specs all green: golden-path, cancel, rejection, admin-reload, list-filter (5/5)
+- [x] `README.md` quickstart complete
+
+## Key Decisions Log
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Def storage | JSONB blob | Defs read whole; easy field additions without migrations |
+| Instance storage | Normalized tables | Runtime state needs indexed queries |
+| Soft delete | `deleted_at` | Preserve history; hard deletes disallowed |
+| Transaction handling | R2 (`WithTx`) | Ergonomic; tx explicit per call site |
+| Concurrency | `SELECT FOR UPDATE` on instance | Serializes concurrent completions; Postgres-native |
+| Router | gorilla/mux | Established, path vars, method routing |
+| DB driver | `database/sql` + `lib/pq` | Standard library interface; pgx had dependency issues; both *sql.DB and *sql.Tx satisfy DB interface natively |
+| Query style | Raw SQL | Simple queries; no ORM abstraction cost |
+| Test DB isolation | Truncate between tests | Engine uses own txns; test-level wrapping awkward |
+| Mock style | Hand-written | Small surface; no codegen tool dep |
+| Task type registry | Go const (C1) | Validated at load; no migration per new type |
+| State/task key scope | Workflow-local | Different domains need different vocab |
+| Multi-edge | Unified (linear/task-bound/user-picks auto-derived) | Config shape determines semantics |
+| Webhook registry | Static `webhooks.json` | Simple; v2 → DB-backed |
+| Webhook delivery | Outbox + worker + retry | Durable; survives crash |
+| Frontend serving | Embedded in Go binary | Single container, single port |
+| Container base | alpine:3.20 | Debugger-friendly, small |
+| CI | Deferred to v2 | Not needed for v1 |
+| E2e testing | Playwright + Chromium | Full browser coverage |
+| Terminal states | Multiple allowed (any state with 0 tasks + 0 outgoing) | Real workflows have multiple terminals (approved, denied, wont_fix); end_state = declared success terminal only |
+| Validator warnings | Non-blocking (logged + returned in reload response) | Permissive; ops sees warnings in admin UI/API; hard errors only for structural breaks |
+| Engine tx ownership | Engine holds `*sql.DB`, opens tx internally | Service layer calls engine; webhook outbox separate tx (acceptable for v1) |
+| Frontend dev serving | Vite dev server proxied to :8080; prod = embedded in Go binary | Single port in prod; hot reload in dev |

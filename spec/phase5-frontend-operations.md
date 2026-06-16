@@ -1,233 +1,252 @@
-# Phase 5: Frontend Operations + Polish
+# Phase 5 — Frontend Operations
 
-## Overview
+## Goal
+Instance lifecycle management: start, monitor, complete tasks, cancel. Adds live graph (current state highlighted), task completion UI per type, admin reload page.
 
-Add the runtime/operations side of the frontend: starting and managing process instances, viewing workflow and task states, performing task actions (assign, update status, trigger transitions), and viewing state transition audit history. Extends the existing MUI-based admin portal.
-
-## Scope
-
-| Feature | Description |
-|---|---|
-| Instance API client | API functions for process instances, workflow instances, task instances, transitions |
-| Instance types | TypeScript interfaces for all instance models |
-| Instances list page | Table of all process instances with status, process name, timestamps |
-| Instance detail page | Process instance detail: workflow instances, task instances, current states |
-| Task actions | Assign, move to in_progress, complete, fail, skip tasks |
-| Manual transitions | Trigger unguarded workflow transitions |
-| Audit log | State transition history per workflow instance |
-| Sidebar nav update | Add "Instances" link to sidebar |
+---
 
 ## New Routes
 
-| Route | Page | Description |
-|---|---|---|
-| `/instances` | InstanceListPage | Table of all process instances |
-| `/instances/:id` | InstanceDetailPage | Detail view: workflows, tasks, transitions |
+| Route | Component | Purpose |
+|-------|-----------|---------|
+| `/workflow-instances` | `InstanceListPage` | List + filter instances |
+| `/workflow-instances/new` | `StartInstancePage` | Start new instance |
+| `/workflow-instances/:id` | `InstanceDetailPage` | Live detail + tasks + history |
+| `/task-instances/:id` | `TaskDetailPage` | Standalone task deep-link |
+| `/admin/reload` | `AdminReloadPage` | Trigger reload-defs |
 
-## Types to Add (`types/index.ts`)
+Sidebar items "Instances" and "Admin" become active links.
 
-```typescript
-interface ProcessInstance {
-  id: string;
-  process_id: string;
-  parent_id: string | null;
-  status: string;          // running, completed, cancelled, failed
-  started_at: string;
-  completed_at: string | null;
-  created_at: string;
-  updated_at: string;
+---
+
+## Instance List Page (`/workflow-instances`)
+
+**Filters (URL query params, persisted):**
+- `def_id` — workflow def picker (searchable dropdown)
+- `status` — `active | completed | cancelled | all` (default: all)
+- `limit` / `offset` — pagination
+
+**Table columns:** ID (monospace, truncated + copy button), Workflow Def, Status badge, Current State, Started At, Completed At
+
+**Actions:**
+- Row click → detail page
+- "Start Instance" button (top-right) → `/workflow-instances/new`
+
+**Polling:** every 15s when window focused.
+
+---
+
+## Start Instance Page (`/workflow-instances/new`)
+
+Form fields:
+1. **Workflow def** — searchable autocomplete. Shows `name @ v{version}`. Required.
+2. **Created by** — free text. Required.
+3. **Initial context** — KV editor (add row: key, value textarea) with "Raw JSON" toggle (textarea). Optional. Validated as valid JSON on submit.
+
+On submit: `POST /api/v1/workflow-instances` → on success, redirect to `/workflow-instances/:id`.
+
+Validation: react-hook-form + zod schema. Inline field errors.
+
+"Start Instance" button also available as quick-action on `/workflow-defs/:id` detail page (opens modal with def pre-filled).
+
+---
+
+## Instance Detail Page (`/workflow-instances/:id`)
+
+### Header
+```
+leave-approval v1   ●active                            [Cancel Instance]
+ID: 3f8a...  Started: 2026-06-12 10:00  By: pankaj.gupta
+```
+Cancel button: confirmation dialog (shadcn `AlertDialog`). On confirm: `POST /instance/:id/cancel`.
+
+### Main Layout (two-panel)
+```
+┌─ State Graph ─────────────────────────────────┬─ Task Panel ──────────────┐
+│  (React Flow — live current state highlighted) │  Open Tasks               │
+│  Visited states: filled                        │  [task cards]             │
+│  Current state: pulsing indigo ring            │                           │
+│  Future states: outlined                       │  Completed Tasks          │
+│  Taken edges: solid + colored                  │  [collapsible]            │
+│  Untaken edges: dashed                         │                           │
+│                                                │  Cancelled Tasks          │
+│                                                │  [collapsible]            │
+├────────────────────────────────────────────────┴───────────────────────────┤
+│  History Timeline (state_transition audit)                                  │
+│  ● submitted → hr_review   2026-06-12 10:05                                │
+│  ● hr_review → approved    2026-06-12 10:30                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Polling:** 5s while instance is `active`; paused when window blurred; stopped when terminal.
+
+**Optimistic update on task complete:** immediately update local task status + instance state; rollback on API error with toast.
+
+**Stale badge:** shown if last successful poll was >10s ago.
+
+---
+
+## Task Cards (in Instance Detail)
+
+Each open task renders its **type-specific card** from the task renderer registry.
+
+### Task Renderer Registry (`src/components/tasks/registry.ts`)
+```ts
+export const rendererFor = (type: string): TaskRenderer =>
+  registry[type] ?? ManualTaskRenderer
+
+const registry: Record<string, TaskRenderer> = {
+  approval:  ApprovalTaskRenderer,
+  form:      FormTaskRenderer,
+  checklist: ChecklistTaskRenderer,
+  manual:    ManualTaskRenderer,
+}
+```
+
+### Per-Type Renderers
+
+**ApprovalTaskRenderer:**
+- Task label + type chip + status badge
+- Outcome buttons: [✓ Approve] [✗ Reject]
+- Optional comment textarea (sent as `data.comment`)
+- If state has >1 outgoing + no triggers (user-picks): shows `next_state` dropdown above outcome buttons
+
+**ManualTaskRenderer:**
+- Task label + type chip
+- [Mark Done] [Reject] buttons
+- Optional note textarea
+
+**FormTaskRenderer (v1 stub):**
+- Task label + "Form" chip
+- Free-text textarea (sent as `data.note`)
+- [Submit] [Reject] buttons
+
+**ChecklistTaskRenderer (v1 stub):**
+- Same as ManualTaskRenderer (full checklist in v2)
+
+### Decision State UI (User-Picks)
+When state has >1 outgoing + no triggers:
+```
+[Next step]  ▾  [hr_review | fast_track | rejected]
+[Mark Done]  [Reject]
+```
+`next_state` required before submit; validated client-side.
+
+### Task-Bound State UI
+Renderer hides `next_state` selector. Completing the bound task auto-selects edge. UI shows which edge this task fires ("→ hr_review" label, dimmed).
+
+### Task Complete API Call
+```ts
+POST /api/v1/task-instances/:id/complete
+{
+  status: "done" | "rejected",
+  next_state?: string,         // user-picks only
+  completed_by: string,        // from a global session store (free text v1)
+  outcome?: string,            // optional, v2 use
+  data?: object                // optional, v2 use
+}
+```
+
+---
+
+## Task Detail Page (`/task-instances/:id`)
+
+Standalone page for external deep-link (e.g., from webhook email notification):
+```
+Header: task label · type · status badge
+Instance: [link to instance] workflow name
+[TaskRenderer — same component, full page]
+```
+Polls every 10s. If task already terminal: shows read-only status + result.
+
+---
+
+## Admin Reload Page (`/admin/reload`)
+
+```
+[Reload Workflow Definitions]          (button)
+
+Last result:
+  Loaded (3):  leave-approval v1, bug-triage v1, expense-review v2
+  Warnings (1): leave-approval v1 — W1: State "triage" has multiple outgoing...
+  Errors (0):
+```
+
+On click: `POST /api/v1/admin/reload-defs`. Disables button while in-flight. Shows spinner. Result displayed below.
+
+---
+
+## Global State (Minimal)
+
+```ts
+// src/lib/session.ts — simple localStorage key
+export const getCompletedBy = () => localStorage.getItem('completed_by') ?? ''
+export const setCompletedBy = (v: string) => localStorage.setItem('completed_by', v)
+```
+
+First task completion: if `completed_by` empty, prompt user to enter name (persisted). Not authentication — just identifier.
+
+---
+
+## New API Modules
+
+```ts
+// src/api/instances.ts
+export const instancesApi = {
+  list:    (filter: InstanceFilter) => apiFetch<InstanceListResponse>('/api/v1/workflow-instances?' + qs),
+  getById: (id: string) => apiFetch<WorkflowInstanceDetailResponse>(`/api/v1/workflow-instances/${id}`),
+  start:   (req: StartInstanceRequest) => apiFetch<WorkflowInstanceResponse>('/api/v1/workflow-instances', { method: 'POST', body: JSON.stringify(req) }),
+  cancel:  (id: string) => apiFetch<WorkflowInstanceResponse>(`/api/v1/workflow-instances/${id}/cancel`, { method: 'POST' }),
 }
 
-interface WorkflowInstance {
-  id: string;
-  workflow_id: string;
-  process_instance_id: string;
-  current_state: string;
-  status: string;          // active, completed, cancelled
-  created_at: string;
-  updated_at: string;
+// src/api/tasks.ts
+export const tasksApi = {
+  getById:  (id: string) => apiFetch<TaskInstanceResponse>(`/api/v1/task-instances/${id}`),
+  start:    (id: string) => apiFetch<TaskInstanceResponse>(`/api/v1/task-instances/${id}/start`, { method: 'POST' }),
+  complete: (id: string, req: CompleteTaskRequest) => apiFetch<WorkflowInstanceResponse>(`/api/v1/task-instances/${id}/complete`, { method: 'POST', body: JSON.stringify(req) }),
+  listByInstance: (instanceId: string, status?: string) => apiFetch<TaskInstanceResponse[]>(`/api/v1/workflow-instances/${instanceId}/tasks`),
 }
 
-interface TaskInstance {
-  id: string;
-  task_id: string;
-  workflow_instance_id: string;
-  status: string;          // pending, in_progress, completed, skipped, failed
-  assigned_to: string;
-  completed_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface StateTransition {
-  id: string;
-  workflow_instance_id: string;
-  from_state: string;
-  to_state: string;
-  transition_name: string;
-  triggered_by: string;
-  trigger_type: string;    // human, ai_agent, rule, process
-  created_at: string;
-}
-
-interface StartProcessInput {
-  process_id: string;
-  parent_id?: string;
-}
-
-interface UpdateTaskStatusInput {
-  status: string;
-  triggered_by?: string;
-  trigger_type?: string;
-}
-
-interface AssignTaskInput {
-  assigned_to: string;
-}
-
-interface TriggerTransitionInput {
-  transition_name: string;
-  triggered_by: string;
-  trigger_type: string;
+// src/api/admin.ts
+export const adminApi = {
+  reloadDefs: () => apiFetch<ReloadResult>('/api/v1/admin/reload-defs', { method: 'POST' }),
 }
 ```
 
-## API Client Functions
+---
 
-### `api/processInstances.ts`
-```typescript
-listProcessInstances(offset?, limit?): Promise<ProcessInstance[]>
-getProcessInstance(id): Promise<ProcessInstance>
-startProcessInstance(input: StartProcessInput): Promise<ProcessInstance>
-cancelProcessInstance(id): Promise<void>
-listChildren(id): Promise<ProcessInstance[]>
+## New Hooks
+
+```ts
+useInstances(filter)               // with polling 15s
+useInstance(id)                    // with polling 5s, stops when terminal
+useTasksByInstance(instanceId)
+useCompleteTask()                  // mutation, optimistic
+useCancelInstance()                // mutation
+useReloadDefs()                    // mutation
 ```
 
-### `api/workflowInstances.ts`
-```typescript
-listWorkflowInstances(processInstanceId): Promise<WorkflowInstance[]>
-getWorkflowInstance(id): Promise<WorkflowInstance>
-triggerTransition(id, input: TriggerTransitionInput): Promise<StateTransition>
-```
+---
 
-### `api/taskInstances.ts`
-```typescript
-listTaskInstances(workflowInstanceId): Promise<TaskInstance[]>
-getTaskInstance(id): Promise<TaskInstance>
-updateTaskStatus(id, input: UpdateTaskStatusInput): Promise<TaskInstance>
-assignTask(id, input: AssignTaskInput): Promise<TaskInstance>
-```
+## Tests (Vitest + RTL)
 
-### `api/stateTransitions.ts`
-```typescript
-listStateTransitions(workflowInstanceId): Promise<StateTransition[]>
-```
+- `InstanceListPage`: renders list, shows filters, pagination
+- `StartInstancePage`: form validation, submit fires correct API, redirects on success
+- `InstanceDetailPage`: shows live graph, task cards, history timeline
+- `ApprovalTaskRenderer`: approve fires complete with status=done, reject fires with status=rejected, next_state required when user-picks
+- `TaskDetailPage`: renders task, shows read-only when terminal
+- `AdminReloadPage`: button calls reload API, shows result
 
-**Note:** State transitions endpoint does not exist yet in backend. We will add a `GET /api/v1/workflow-instances/{id}/transitions` route.
+---
 
-## Pages
-
-### InstanceListPage (`/instances`)
-
-- MUI `Table` listing all process instances
-- Columns: process name (looked up from process_id), status, started_at, completed_at
-- Status chips: `running`=info, `completed`=success, `cancelled`=warning, `failed`=error
-- "Start Process" button → dialog with process selector (dropdown of active processes)
-- Row click → navigate to `/instances/:id`
-- Data loaded from `GET /api/v1/process-instances`
-- Process names resolved by fetching processes list once and building a lookup map
-
-### InstanceDetailPage (`/instances/:id`)
-
-Top-level layout:
-- Header: process name, instance status chip, started_at, cancel button (if running)
-- Section per workflow instance (accordion panels, like ProcessDetailPage)
-
-Each workflow instance section:
-- **Header**: workflow name, current state chip, status chip
-- **Task instances table**:
-  - Columns: task name, status, assigned_to, actions
-  - Task name resolved via task definition lookup
-  - Actions column (per-row buttons based on current status):
-    - `pending` → "Start" button (moves to in_progress)
-    - `in_progress` → "Complete" / "Fail" buttons
-    - Any non-terminal → "Assign" button → small popover/dialog for username
-    - `completed`/`failed`/`skipped` → no actions (read-only)
-  - Status chips: `pending`=default, `in_progress`=info, `completed`=success, `failed`=error, `skipped`=warning
-- **Manual transitions section** (below tasks):
-  - Show available transitions from the workflow's state machine for the current state
-  - Each rendered as a button: "Trigger: {transition_name}"
-  - Only show transitions without a completion_rule (unguarded) or where completion rule is already satisfied (simpler: show all valid-from-state transitions, backend will reject if guard fails)
-  - Clicking opens a small dialog: triggered_by (text field), trigger_type (dropdown: human/ai_agent)
-  - On success, reload the instance detail
-- **Audit log section** (below transitions):
-  - MUI `Table` showing state transition history for this workflow instance
-  - Columns: from_state, to_state, transition_name, triggered_by, trigger_type, timestamp
-  - Ordered by created_at descending (newest first)
-  - Data from `GET /api/v1/workflow-instances/{id}/transitions`
-
-## Backend Addition
-
-### New endpoint: list state transitions
-
-**Route:** `GET /api/v1/workflow-instances/{id}/transitions`
-
-The `StateTransitionRepo.ListByWorkflowInstanceID` method already exists. We need:
-1. A handler method on `WorkflowInstanceHandler` or a new `StateTransitionHandler`
-2. Register the route in `router.go`
-
-This is a simple read-only endpoint — add it to the existing `WorkflowInstanceHandler` to keep things simple.
-
-## Sidebar Update
-
-Add "Instances" nav item to `Layout.tsx` sidebar:
-```
-Processes    (AccountTreeIcon)    → /
-Instances    (PlayArrowIcon)      → /instances
-```
-
-Highlight based on `location.pathname`.
-
-## Test Plan
-
-### Frontend unit tests (Vitest + RTL)
-
-| Test | What it verifies |
-|---|---|
-| InstanceListPage renders | Shows table, "Start Process" button |
-| InstanceListPage empty state | Shows "No instances yet" when list is empty |
-| InstanceDetailPage renders | Shows process name, workflow sections, task tables |
-| Task action buttons | Correct buttons shown per task status (Start for pending, Complete/Fail for in_progress) |
-| API client functions | Correct URL construction for all instance endpoints |
-
-### Backend integration test
-
-| Test | What it verifies |
-|---|---|
-| TestAPI_StateTransitionsList | `GET /workflow-instances/{id}/transitions` returns transition history after a manual transition |
-
-## File Summary
-
-New files:
-```
-frontend/src/api/processInstances.ts
-frontend/src/api/workflowInstances.ts
-frontend/src/api/taskInstances.ts
-frontend/src/api/stateTransitions.ts
-frontend/src/pages/InstanceListPage.tsx
-frontend/src/pages/InstanceDetailPage.tsx
-frontend/src/__tests__/InstanceListPage.test.tsx
-frontend/src/__tests__/api-instances.test.ts
-```
-
-Modified files:
-```
-frontend/src/types/index.ts          — add instance types
-frontend/src/components/Layout.tsx   — add Instances nav item
-frontend/src/App.tsx                 — add instance routes
-backend/internal/api/handler/workflow_instance.go — add ListTransitions handler
-backend/internal/api/router.go       — add transitions route
-backend/tests/integration/api_test.go — add transitions test
-spec/testDetails.md                  — update with new tests
-spec/Currentstatus.md               — update status
-```
+## Exit Criteria
+- [ ] Start instance flow works end-to-end (form → instance detail)
+- [ ] Task completion progresses instance state (graph updates)
+- [ ] Rejection cancels instance + shows cancelled status
+- [ ] Decision state: next_state dropdown present + validated
+- [ ] Task-bound: sibling task cards show `cancelled` status after bound task completed
+- [ ] Instance cancel: all open tasks show cancelled
+- [ ] Deep-link `/task-instances/:id` renders and allows completion
+- [ ] Admin reload page shows correct warnings
+- [ ] Polling stops for terminal instances
+- [ ] `npm test` green

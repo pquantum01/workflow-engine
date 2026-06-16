@@ -1,33 +1,40 @@
-const API_BASE = '/api/v1';
-
 export class ApiError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
+  code: string
+  details: unknown
+
+  constructor(code: string, message: string, details?: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.code = code
+    this.details = details
   }
 }
 
-export async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const resp = await fetch(`${API_BASE}${path}`, {
-    ...options,
+export async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
+  const resp = await fetch(path, {
+    ...opts,
     headers: {
       'Content-Type': 'application/json',
-      ...options?.headers,
+      ...opts?.headers,
     },
-  });
+  })
 
   if (!resp.ok) {
-    let msg = `Request failed with status ${resp.status}`;
+    let code = 'INTERNAL'
+    let message = `HTTP ${resp.status}`
+    let details: unknown
     try {
-      const body = await resp.json();
-      if (body.error) msg = body.error;
-    } catch {
-      // ignore parse errors
-    }
-    throw new ApiError(resp.status, msg);
+      const body = await resp.json()
+      if (body?.error) {
+        code = body.error.code ?? code
+        message = body.error.message ?? message
+        details = body.error.details
+      }
+    } catch { /* ignore */ }
+    throw new ApiError(code, message, details)
   }
 
-  if (resp.status === 204) return undefined as T;
-  return resp.json();
+  if (resp.status === 204) return undefined as T
+
+  return resp.json()
 }

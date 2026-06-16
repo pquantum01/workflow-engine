@@ -2,309 +2,497 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
-	"workflow-engine/backend/internal/model"
-	"workflow-engine/backend/internal/repository"
+	"github.com/sirupsen/logrus"
+	"github.com/workflow-engine/backend/internal/model"
+	"github.com/workflow-engine/backend/internal/repository"
 )
 
-type TransitionResult struct {
-	WorkflowInstanceID uuid.UUID `json:"workflow_instance_id"`
-	FromState          string    `json:"from_state"`
-	ToState            string    `json:"to_state"`
-	TransitionName     string    `json:"transition_name"`
-	IsTerminal         bool      `json:"is_terminal"`
+const (
+	EventTaskCreated       = "task.created"
+	EventTaskCompleted     = "task.completed"
+	EventTaskCancelled     = "task.cancelled"
+	EventStateTransitioned = "state.transitioned"
+	EventInstanceStarted   = "instance.started"
+	EventInstanceCompleted = "instance.completed"
+	EventInstanceCancelled = "instance.cancelled"
+)
+
+type Event struct {
+	Type               string
+	WorkflowInstanceID uuid.UUID
+	Data               map[string]any
 }
 
-type Engine interface {
-	Evaluate(ctx context.Context, workflowInstanceID uuid.UUID) (*TransitionResult, error)
-	TriggerTransition(ctx context.Context, workflowInstanceID uuid.UUID, transitionName, triggeredBy, triggerType string) (*TransitionResult, error)
-}
-
-type engine struct {
-	workflowRepo         repository.WorkflowRepository
-	workflowInstanceRepo repository.WorkflowInstanceRepository
-	taskRepo             repository.TaskRepository
-	taskInstanceRepo     repository.TaskInstanceRepository
-	stateTransitionRepo  repository.StateTransitionRepository
-	logger               *slog.Logger
+type Engine struct {
+	db        *sql.DB
+	defRepo   repository.WorkflowDefRepo
+	instRepo  repository.WorkflowInstanceRepo
+	taskRepo  repository.TaskInstanceRepo
+	transRepo repository.StateTransitionRepo
+	log       *logrus.Logger
 }
 
 func New(
-	workflowRepo repository.WorkflowRepository,
-	workflowInstanceRepo repository.WorkflowInstanceRepository,
-	taskRepo repository.TaskRepository,
-	taskInstanceRepo repository.TaskInstanceRepository,
-	stateTransitionRepo repository.StateTransitionRepository,
-	logger *slog.Logger,
-) Engine {
-	return &engine{
-		workflowRepo:         workflowRepo,
-		workflowInstanceRepo: workflowInstanceRepo,
-		taskRepo:             taskRepo,
-		taskInstanceRepo:     taskInstanceRepo,
-		stateTransitionRepo:  stateTransitionRepo,
-		logger:               logger,
+	db *sql.DB,
+	defRepo repository.WorkflowDefRepo,
+	instRepo repository.WorkflowInstanceRepo,
+	taskRepo repository.TaskInstanceRepo,
+	transRepo repository.StateTransitionRepo,
+	log *logrus.Logger,
+) *Engine {
+	return &Engine{
+		db:        db,
+		defRepo:   defRepo,
+		instRepo:  instRepo,
+		taskRepo:  taskRepo,
+		transRepo: transRepo,
+		log:       log,
 	}
 }
 
-func (e *engine) Evaluate(ctx context.Context, workflowInstanceID uuid.UUID) (*TransitionResult, error) {
-	e.logger.Debug("evaluating workflow instance",
-		slog.String("workflow_instance_id", workflowInstanceID.String()),
-	)
-
-	wi, err := e.workflowInstanceRepo.GetByID(ctx, workflowInstanceID)
+// Start creates a workflow instance in start_state and spawns its tasks.
+func (e *Engine) Start(ctx context.Context, defID uuid.UUID, createdBy string) (*model.WorkflowInstance, []Event, error) {
+	e.log.WithFields(logrus.Fields{"def_id": defID, "created_by": createdBy}).Debug("engine.Start")
+	def, err := e.defRepo.GetByID(ctx, defID)
 	if err != nil {
-		e.logger.Error("failed to evaluate workflow instance",
-			slog.String("workflow_instance_id", workflowInstanceID.String()),
-			slog.String("error", err.Error()),
-		)
-		return nil, fmt.Errorf("get workflow instance: %w", err)
+		e.log.WithFields(logrus.Fields{"def_id": defID, "err": err}).Error("engine.Start: get def failed")
+		return nil, nil, fmt.Errorf("get def: %w", err)
 	}
 
-	if wi.Status != "active" {
-		e.logger.Error("workflow instance is not active",
-			slog.String("workflow_instance_id", workflowInstanceID.String()),
-			slog.String("status", wi.Status),
-		)
-		return nil, fmt.Errorf("workflow instance is not active (status: %s)", wi.Status)
-	}
-
-	wf, err := e.workflowRepo.GetByID(ctx, wi.WorkflowID)
+	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
-		e.logger.Error("failed to get workflow definition",
-			slog.String("workflow_instance_id", workflowInstanceID.String()),
-			slog.String("error", err.Error()),
-		)
-		return nil, fmt.Errorf("get workflow definition: %w", err)
+		e.log.WithField("err", err).Error("engine.Start: begin tx failed")
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	txInstRepo := e.instRepo.WithTx(tx)
+	txTaskRepo := e.taskRepo.WithTx(tx)
+
+	inst := &model.WorkflowInstance{
+		ID:             uuid.New(),
+		WorkflowDefID:  def.ID,
+		CurrentStateID: def.Definition.StartState,
+		Status:         model.InstanceStatusActive,
+		CreatedBy:      createdBy,
+		Context:        map[string]any{},
+		StartedAt:      time.Now().UTC(),
+	}
+	if err := txInstRepo.Create(ctx, inst); err != nil {
+		e.log.WithField("err", err).Error("engine.Start: create instance failed")
+		return nil, nil, fmt.Errorf("create instance: %w", err)
 	}
 
-	if isTerminal(wf.StateMachine, wi.CurrentState) {
-		e.logger.Error("workflow instance is in terminal state",
-			slog.String("workflow_instance_id", workflowInstanceID.String()),
-			slog.String("current_state", wi.CurrentState),
-		)
-		return nil, fmt.Errorf("workflow instance is in terminal state %q", wi.CurrentState)
-	}
-
-	taskInstances, err := e.taskInstanceRepo.ListByWorkflowInstanceID(ctx, workflowInstanceID)
+	events, err := e.spawnTasks(ctx, txTaskRepo, def, inst, def.Definition.StartState, createdBy)
 	if err != nil {
-		e.logger.Error("failed to list task instances",
-			slog.String("workflow_instance_id", workflowInstanceID.String()),
-			slog.String("error", err.Error()),
-		)
-		return nil, fmt.Errorf("list task instances: %w", err)
+		e.log.WithFields(logrus.Fields{"inst_id": inst.ID, "state": def.Definition.StartState, "err": err}).Error("engine.Start: spawn tasks failed")
+		return nil, nil, fmt.Errorf("spawn tasks: %w", err)
 	}
 
-	tasks, err := e.taskRepo.ListByWorkflowID(ctx, wi.WorkflowID)
+	if err := tx.Commit(); err != nil {
+		e.log.WithField("err", err).Error("engine.Start: commit failed")
+		return nil, nil, err
+	}
+
+	e.log.WithFields(logrus.Fields{
+		"inst_id":       inst.ID,
+		"def_id":        def.ID,
+		"def_name":      def.Name,
+		"start_state":   inst.CurrentStateID,
+		"tasks_spawned": len(events),
+	}).Info("engine.Start: instance started")
+
+	events = append([]Event{{
+		Type:               EventInstanceStarted,
+		WorkflowInstanceID: inst.ID,
+		Data:               map[string]any{"workflow_def_id": def.ID.String(), "start_state": inst.CurrentStateID},
+	}}, events...)
+
+	return inst, events, nil
+}
+
+// Complete processes a task completion. Returns updated instance and events.
+func (e *Engine) Complete(ctx context.Context, taskID uuid.UUID, status model.TaskStatus, nextState string, createdBy string) (*model.WorkflowInstance, []Event, error) {
+	e.log.WithFields(logrus.Fields{
+		"task_id":      taskID,
+		"status":       status,
+		"next_state":   nextState,
+		"completed_by": createdBy,
+	}).Debug("engine.Complete")
+
+	if status != model.TaskStatusDone && status != model.TaskStatusRejected {
+		return nil, nil, fmt.Errorf("%w: status must be done or rejected", ErrInvalidStatus)
+	}
+
+	// Load task outside tx to get instanceID
+	task, err := e.taskRepo.GetByID(ctx, taskID)
 	if err != nil {
-		e.logger.Error("failed to list task definitions",
-			slog.String("workflow_instance_id", workflowInstanceID.String()),
-			slog.String("error", err.Error()),
-		)
-		return nil, fmt.Errorf("list task definitions: %w", err)
+		if errors.Is(err, repository.ErrNotFound) {
+			e.log.WithField("task_id", taskID).Warn("engine.Complete: task not found")
+			return nil, nil, ErrNotFound
+		}
+		e.log.WithFields(logrus.Fields{"task_id": taskID, "err": err}).Error("engine.Complete: get task failed")
+		return nil, nil, err
 	}
 
-	taskNameMap := buildTaskNameMap(tasks, taskInstances)
+	// Quick non-locking instance check to give correct error before tx
+	inst, err := e.instRepo.GetByID(ctx, task.WorkflowInstanceID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, nil, ErrNotFound
+		}
+		return nil, nil, err
+	}
+	if inst.IsTerminal() {
+		e.log.WithFields(logrus.Fields{
+			"inst_id":     inst.ID,
+			"inst_status": inst.Status,
+			"task_id":     taskID,
+		}).Warn("engine.Complete: instance already terminal")
+		return nil, nil, ErrInstanceTerminal
+	}
+	if !task.IsCompletable() {
+		e.log.WithFields(logrus.Fields{
+			"task_id":     taskID,
+			"task_status": task.Status,
+		}).Warn("engine.Complete: task not completable")
+		return nil, nil, ErrTaskNotCompletable
+	}
 
-	for _, t := range wf.StateMachine.Transitions {
-		if t.FromState != wi.CurrentState {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	txInstRepo := e.instRepo.WithTx(tx)
+	txTaskRepo := e.taskRepo.WithTx(tx)
+	txTransRepo := e.transRepo.WithTx(tx)
+
+	// Lock instance row — authoritative check under lock
+	inst, err = txInstRepo.GetByIDForUpdate(ctx, task.WorkflowInstanceID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("lock instance: %w", err)
+	}
+	if inst.IsTerminal() {
+		return nil, nil, ErrInstanceTerminal
+	}
+
+	// Re-check task under lock (may have changed)
+	task, err = txTaskRepo.GetByID(ctx, taskID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !task.IsCompletable() {
+		return nil, nil, ErrTaskNotCompletable
+	}
+
+	def, err := e.defRepo.GetByID(ctx, inst.WorkflowDefID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get def: %w", err)
+	}
+
+	var events []Event
+	now := time.Now().UTC()
+
+	if status == model.TaskStatusRejected {
+		// Mark task rejected
+		if err := txTaskRepo.UpdateStatus(ctx, task.ID, model.TaskStatusRejected, &now); err != nil {
+			return nil, nil, err
+		}
+		events = append(events, Event{Type: EventTaskCompleted, WorkflowInstanceID: inst.ID,
+			Data: map[string]any{"task_id": task.ID.String(), "status": "rejected"}})
+
+		// Cancel all other open tasks
+		cancelEvents, err := e.cancelOpenTasks(ctx, txTaskRepo, inst.ID, task.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		events = append(events, cancelEvents...)
+
+		// Cancel instance
+		if err := txInstRepo.UpdateStatus(ctx, inst.ID, model.InstanceStatusCancelled, &now); err != nil {
+			return nil, nil, err
+		}
+		inst.Status = model.InstanceStatusCancelled
+		inst.CompletedAt = &now
+		events = append(events, Event{Type: EventInstanceCancelled, WorkflowInstanceID: inst.ID, Data: map[string]any{}})
+
+		if err := tx.Commit(); err != nil {
+			return nil, nil, err
+		}
+		e.log.WithFields(logrus.Fields{"task_id": taskID, "inst_id": inst.ID}).Info("engine.Complete: task rejected, instance cancelled")
+		return inst, events, nil
+	}
+
+	// status == done
+	if err := txTaskRepo.UpdateStatus(ctx, task.ID, model.TaskStatusDone, &now); err != nil {
+		return nil, nil, err
+	}
+	events = append(events, Event{Type: EventTaskCompleted, WorkflowInstanceID: inst.ID,
+		Data: map[string]any{"task_id": task.ID.String(), "status": "done"}})
+
+	mode := def.Definition.TransitionMode(task.StateID)
+	nextStateID, cancelEvents, err := e.resolveTransition(ctx, txTaskRepo, def, inst, task, mode, nextState)
+	if err != nil {
+		return nil, nil, err
+	}
+	events = append(events, cancelEvents...)
+
+	if nextStateID == "" {
+		// Linear: waiting for other tasks
+		if err := tx.Commit(); err != nil {
+			return nil, nil, err
+		}
+		e.log.WithFields(logrus.Fields{"task_id": taskID, "inst_id": inst.ID, "state": task.StateID}).Debug("engine.Complete: task done, waiting for sibling tasks")
+		return inst, events, nil
+	}
+
+	// Fire transition
+	tr := &model.StateTransition{
+		ID:                 uuid.New(),
+		WorkflowInstanceID: inst.ID,
+		FromState:          task.StateID,
+		ToState:            nextStateID,
+		TransitionedAt:     now,
+	}
+	if err := txTransRepo.Append(ctx, tr); err != nil {
+		return nil, nil, err
+	}
+	if err := txInstRepo.UpdateState(ctx, inst.ID, nextStateID); err != nil {
+		return nil, nil, err
+	}
+	inst.CurrentStateID = nextStateID
+	events = append(events, Event{Type: EventStateTransitioned, WorkflowInstanceID: inst.ID,
+		Data: map[string]any{"from_state": task.StateID, "to_state": nextStateID}})
+
+	nextStateDef, _ := def.Definition.FindState(nextStateID)
+	isTerminalState := nextStateDef != nil && len(nextStateDef.Tasks) == 0 && len(def.Definition.OutgoingTransitions(nextStateID)) == 0
+
+	if isTerminalState {
+		if err := txInstRepo.UpdateStatus(ctx, inst.ID, model.InstanceStatusCompleted, &now); err != nil {
+			return nil, nil, err
+		}
+		inst.Status = model.InstanceStatusCompleted
+		inst.CompletedAt = &now
+		events = append(events, Event{Type: EventInstanceCompleted, WorkflowInstanceID: inst.ID,
+			Data: map[string]any{"final_state": nextStateID}})
+	} else {
+		// Spawn tasks for next state
+		spawnEvents, err := e.spawnTasks(ctx, txTaskRepo, def, inst, nextStateID, createdBy)
+		if err != nil {
+			return nil, nil, err
+		}
+		events = append(events, spawnEvents...)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	e.log.WithFields(logrus.Fields{
+		"task_id":     taskID,
+		"inst_id":     inst.ID,
+		"from_state":  task.StateID,
+		"to_state":    nextStateID,
+		"inst_status": inst.Status,
+	}).Info("engine.Complete: transition fired")
+	return inst, events, nil
+}
+
+// Cancel cancels an active instance and all its open tasks.
+func (e *Engine) Cancel(ctx context.Context, instanceID uuid.UUID) (*model.WorkflowInstance, []Event, error) {
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+
+	txInstRepo := e.instRepo.WithTx(tx)
+	txTaskRepo := e.taskRepo.WithTx(tx)
+
+	inst, err := txInstRepo.GetByIDForUpdate(ctx, instanceID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, nil, ErrNotFound
+		}
+		return nil, nil, err
+	}
+	if inst.IsTerminal() {
+		return nil, nil, ErrInstanceTerminal
+	}
+
+	now := time.Now().UTC()
+	cancelEvents, err := e.cancelOpenTasks(ctx, txTaskRepo, instanceID, uuid.Nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := txInstRepo.UpdateStatus(ctx, instanceID, model.InstanceStatusCancelled, &now); err != nil {
+		return nil, nil, err
+	}
+	inst.Status = model.InstanceStatusCancelled
+	inst.CompletedAt = &now
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+
+	events := append(cancelEvents, Event{
+		Type:               EventInstanceCancelled,
+		WorkflowInstanceID: instanceID,
+		Data:               map[string]any{},
+	})
+	e.log.WithField("inst_id", instanceID).Info("engine.Cancel: instance cancelled")
+	return inst, events, nil
+}
+
+// resolveTransition determines the next state ID (empty = wait for more tasks).
+func (e *Engine) resolveTransition(
+	ctx context.Context,
+	taskRepo repository.TaskInstanceRepo,
+	def *model.WorkflowDef,
+	inst *model.WorkflowInstance,
+	task *model.TaskInstance,
+	mode model.TransitionMode,
+	callerNextState string,
+) (nextStateID string, cancelEvents []Event, err error) {
+	outs := def.Definition.OutgoingTransitions(task.StateID)
+
+	switch mode {
+	case model.ModeLinear:
+		// Wait for all non-cancelled tasks in this state to be done
+		stateTasks, err := taskRepo.ListByInstanceAndState(ctx, inst.ID, task.StateID)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, t := range stateTasks {
+			if t.Status == model.TaskStatusCancelled {
+				continue
+			}
+			if t.Status != model.TaskStatusDone {
+				return "", nil, nil // still waiting
+			}
+		}
+		return outs[0].ToState, nil, nil
+
+	case model.ModeTaskBound:
+		// Find the edge whose trigger matches this task
+		for _, tr := range outs {
+			if tr.Trigger != nil && tr.Trigger.TaskKey == task.TaskKey {
+				// Cancel sibling tasks
+				stateTasks, err := taskRepo.ListByInstanceAndState(ctx, inst.ID, task.StateID)
+				if err != nil {
+					return "", nil, err
+				}
+				now := time.Now().UTC()
+				for _, sibling := range stateTasks {
+					if sibling.ID == task.ID || sibling.IsTerminal() {
+						continue
+					}
+					if err := taskRepo.UpdateStatus(ctx, sibling.ID, model.TaskStatusCancelled, &now); err != nil {
+						return "", nil, err
+					}
+					cancelEvents = append(cancelEvents, Event{
+						Type:               EventTaskCancelled,
+						WorkflowInstanceID: inst.ID,
+						Data:               map[string]any{"task_id": sibling.ID.String()},
+					})
+				}
+				return tr.ToState, cancelEvents, nil
+			}
+		}
+		return "", nil, fmt.Errorf("no task-bound edge found for task key %q", task.TaskKey)
+
+	case model.ModeUserPicks:
+		if callerNextState == "" {
+			return "", nil, ErrNextStateRequired
+		}
+		// Validate next_state is a valid outgoing edge
+		for _, tr := range outs {
+			if tr.ToState == callerNextState {
+				return callerNextState, nil, nil
+			}
+		}
+		return "", nil, fmt.Errorf("%w: %q", ErrInvalidNextState, callerNextState)
+	}
+
+	return "", nil, fmt.Errorf("unknown transition mode %d", mode)
+}
+
+func (e *Engine) spawnTasks(ctx context.Context, taskRepo repository.TaskInstanceRepo, def *model.WorkflowDef, inst *model.WorkflowInstance, stateID string, createdBy string) ([]Event, error) {
+	stateDef, ok := def.Definition.FindState(stateID)
+	if !ok || len(stateDef.Tasks) == 0 {
+		return nil, nil
+	}
+
+	now := time.Now().UTC()
+	tasks := make([]*model.TaskInstance, 0, len(stateDef.Tasks))
+	for _, td := range stateDef.Tasks {
+		tasks = append(tasks, &model.TaskInstance{
+			ID:                 uuid.New(),
+			WorkflowInstanceID: inst.ID,
+			StateID:            stateID,
+			TaskKey:            td.Key,
+			TaskLabel:          td.Label,
+			TaskType:           td.Type,
+			Status:             model.TaskStatusNew,
+			CreatedBy:          createdBy,
+			CreatedAt:          now,
+		})
+	}
+	if err := taskRepo.BulkCreate(ctx, tasks); err != nil {
+		return nil, err
+	}
+
+	events := make([]Event, 0, len(tasks))
+	for _, t := range tasks {
+		events = append(events, Event{
+			Type:               EventTaskCreated,
+			WorkflowInstanceID: inst.ID,
+			Data:               map[string]any{"task_id": t.ID.String(), "task_key": t.TaskKey, "state_id": stateID},
+		})
+	}
+	return events, nil
+}
+
+func (e *Engine) cancelOpenTasks(ctx context.Context, taskRepo repository.TaskInstanceRepo, instanceID uuid.UUID, excludeID uuid.UUID) ([]Event, error) {
+	openTasks, err := taskRepo.ListByInstance(ctx, instanceID, []model.TaskStatus{
+		model.TaskStatusNew, model.TaskStatusInProgress,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	var events []Event
+	for _, t := range openTasks {
+		if t.ID == excludeID {
 			continue
 		}
-		if t.CompletionRule == nil {
-			continue // unguarded transitions need explicit trigger
+		if err := taskRepo.UpdateStatus(ctx, t.ID, model.TaskStatusCancelled, &now); err != nil {
+			return nil, err
 		}
-		if isCompletionRuleSatisfied(t.CompletionRule, taskNameMap) {
-			return e.applyTransition(ctx, wi, wf, t, "system", "rule")
-		}
+		events = append(events, Event{
+			Type:               EventTaskCancelled,
+			WorkflowInstanceID: instanceID,
+			Data:               map[string]any{"task_id": t.ID.String()},
+		})
 	}
-
-	e.logger.Info("evaluate completed with no transition",
-		slog.String("workflow_instance_id", workflowInstanceID.String()),
-		slog.String("current_state", wi.CurrentState),
-	)
-	return nil, nil
+	return events, nil
 }
 
-func (e *engine) TriggerTransition(ctx context.Context, workflowInstanceID uuid.UUID, transitionName, triggeredBy, triggerType string) (*TransitionResult, error) {
-	e.logger.Debug("triggering transition",
-		slog.String("workflow_instance_id", workflowInstanceID.String()),
-		slog.String("transition_name", transitionName),
-		slog.String("triggered_by", triggeredBy),
-		slog.String("trigger_type", triggerType),
-	)
-
-	wi, err := e.workflowInstanceRepo.GetByID(ctx, workflowInstanceID)
-	if err != nil {
-		e.logger.Error("failed to trigger transition",
-			slog.String("workflow_instance_id", workflowInstanceID.String()),
-			slog.String("transition_name", transitionName),
-			slog.String("error", err.Error()),
-		)
-		return nil, fmt.Errorf("get workflow instance: %w", err)
-	}
-
-	if wi.Status != "active" {
-		return nil, fmt.Errorf("workflow instance is not active (status: %s)", wi.Status)
-	}
-
-	wf, err := e.workflowRepo.GetByID(ctx, wi.WorkflowID)
-	if err != nil {
-		return nil, fmt.Errorf("get workflow definition: %w", err)
-	}
-
-	if isTerminal(wf.StateMachine, wi.CurrentState) {
-		return nil, fmt.Errorf("workflow instance is in terminal state %q", wi.CurrentState)
-	}
-
-	var transition *model.Transition
-	for i := range wf.StateMachine.Transitions {
-		if wf.StateMachine.Transitions[i].Name == transitionName {
-			transition = &wf.StateMachine.Transitions[i]
-			break
-		}
-	}
-
-	if transition == nil {
-		return nil, fmt.Errorf("transition %q not found", transitionName)
-	}
-
-	if transition.FromState != wi.CurrentState {
-		return nil, fmt.Errorf("transition %q requires state %q but current state is %q", transitionName, transition.FromState, wi.CurrentState)
-	}
-
-	if transition.CompletionRule != nil {
-		taskInstances, err := e.taskInstanceRepo.ListByWorkflowInstanceID(ctx, workflowInstanceID)
-		if err != nil {
-			return nil, fmt.Errorf("list task instances: %w", err)
-		}
-		tasks, err := e.taskRepo.ListByWorkflowID(ctx, wi.WorkflowID)
-		if err != nil {
-			return nil, fmt.Errorf("list task definitions: %w", err)
-		}
-		taskNameMap := buildTaskNameMap(tasks, taskInstances)
-
-		if !isCompletionRuleSatisfied(transition.CompletionRule, taskNameMap) {
-			return nil, fmt.Errorf("completion rule not satisfied for transition %q", transitionName)
-		}
-	}
-
-	return e.applyTransition(ctx, wi, wf, *transition, triggeredBy, triggerType)
-}
-
-func (e *engine) applyTransition(ctx context.Context, wi *model.WorkflowInstance, wf *model.Workflow, t model.Transition, triggeredBy, triggerType string) (*TransitionResult, error) {
-	fromState := wi.CurrentState
-	wi.CurrentState = t.ToState
-	wi.UpdatedAt = time.Now().UTC()
-
-	terminal := isTerminal(wf.StateMachine, t.ToState)
-	if terminal {
-		wi.Status = "completed"
-	}
-
-	if err := e.workflowInstanceRepo.Update(ctx, wi); err != nil {
-		return nil, fmt.Errorf("update workflow instance: %w", err)
-	}
-
-	st := &model.StateTransition{
-		ID:                 uuid.New(),
-		WorkflowInstanceID: wi.ID,
-		FromState:          fromState,
-		ToState:            t.ToState,
-		TransitionName:     t.Name,
-		TriggeredBy:        triggeredBy,
-		TriggerType:        triggerType,
-		CreatedAt:          time.Now().UTC(),
-	}
-	if err := e.stateTransitionRepo.Create(ctx, st); err != nil {
-		return nil, fmt.Errorf("log state transition: %w", err)
-	}
-
-	e.logger.Info("state transition applied",
-		slog.String("workflow_instance_id", wi.ID.String()),
-		slog.String("from", fromState),
-		slog.String("to", t.ToState),
-		slog.String("transition", t.Name),
-	)
-
-	return &TransitionResult{
-		WorkflowInstanceID: wi.ID,
-		FromState:          fromState,
-		ToState:            t.ToState,
-		TransitionName:     t.Name,
-		IsTerminal:         terminal,
-	}, nil
-}
-
-func isTerminal(sm model.StateMachine, state string) bool {
-	for _, ts := range sm.TerminalStates {
-		if ts == state {
-			return true
-		}
-	}
-	return false
-}
-
-// buildTaskNameMap maps task definition name -> list of task instance statuses
-func buildTaskNameMap(tasks []*model.Task, instances []*model.TaskInstance) map[string][]string {
-	taskIDToName := make(map[uuid.UUID]string, len(tasks))
-	for _, t := range tasks {
-		taskIDToName[t.ID] = t.Name
-	}
-
-	result := make(map[string][]string)
-	for _, ti := range instances {
-		name := taskIDToName[ti.TaskID]
-		if name != "" {
-			result[name] = append(result[name], ti.Status)
-		}
-	}
-	return result
-}
-
-func isCompletionRuleSatisfied(rule *model.CompletionRule, taskNameMap map[string][]string) bool {
-	switch rule.Type {
-	case "single":
-		return hasCompleted(taskNameMap, rule.TaskRefs[0])
-	case "all_of":
-		for _, ref := range rule.TaskRefs {
-			if !hasCompleted(taskNameMap, ref) {
-				return false
-			}
-		}
-		return true
-	case "any_of":
-		for _, ref := range rule.TaskRefs {
-			if hasCompleted(taskNameMap, ref) {
-				return true
-			}
-		}
-		return false
-	case "n_of_m":
-		count := 0
-		for _, ref := range rule.TaskRefs {
-			if hasCompleted(taskNameMap, ref) {
-				count++
-			}
-		}
-		return count >= rule.N
-	default:
-		return false
-	}
-}
-
-func hasCompleted(taskNameMap map[string][]string, taskRef string) bool {
-	statuses, ok := taskNameMap[taskRef]
-	if !ok {
-		return false
-	}
-	for _, s := range statuses {
-		if s == "completed" {
-			return true
-		}
-	}
-	return false
-}
+// Sentinel errors
+var (
+	ErrNotFound        = fmt.Errorf("not found")
+	ErrInstanceTerminal = fmt.Errorf("instance is in terminal state")
+	ErrTaskNotCompletable = fmt.Errorf("task is not in a completable state")
+	ErrInvalidNextState = fmt.Errorf("invalid next_state")
+	ErrNextStateRequired = fmt.Errorf("next_state is required for user-picks transition")
+	ErrInvalidStatus    = fmt.Errorf("invalid status")
+)

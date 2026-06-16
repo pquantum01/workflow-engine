@@ -1,6 +1,4 @@
-//go:build integration
-
-package integration
+package integration_test
 
 import (
 	"context"
@@ -8,447 +6,137 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"workflow-engine/backend/internal/model"
-	"workflow-engine/backend/internal/repository"
-	"workflow-engine/backend/internal/repository/postgres"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/workflow-engine/backend/internal/model"
+	"github.com/workflow-engine/backend/internal/repository"
 )
 
-func TestProcessInstanceRepo_Create_And_GetByID(t *testing.T) {
-	cleanupTables(t)
-	p := createTestProcess(t)
-	repo := postgres.NewProcessInstanceRepo(testDB)
+func setupDefAndInstance(t *testing.T) (*model.WorkflowDef, *model.WorkflowInstance) {
+	t.Helper()
 	ctx := context.Background()
+	defRepo := repository.NewWorkflowDefRepo(testDB)
+	instRepo := repository.NewWorkflowInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	pi := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: p.ID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
+	def := makeTestDef()
+	require.NoError(t, defRepo.Create(ctx, def))
 
-	if err := repo.Create(ctx, pi); err != nil {
-		t.Fatalf("Create failed: %v", err)
+	inst := &model.WorkflowInstance{
+		ID:             uuid.New(),
+		WorkflowDefID:  def.ID,
+		CurrentStateID: "submitted",
+		Status:         model.InstanceStatusActive,
+		Context:        map[string]any{},
+		StartedAt:      time.Now().UTC(),
 	}
-
-	got, err := repo.GetByID(ctx, pi.ID)
-	if err != nil {
-		t.Fatalf("GetByID failed: %v", err)
-	}
-	if got.Status != "running" {
-		t.Errorf("Status = %q, want %q", got.Status, "running")
-	}
-	if got.ParentID != nil {
-		t.Errorf("ParentID should be nil")
-	}
+	require.NoError(t, instRepo.Create(ctx, inst))
+	return def, inst
 }
 
-func TestProcessInstanceRepo_ParentChild(t *testing.T) {
-	cleanupTables(t)
-	p := createTestProcess(t)
-	repo := postgres.NewProcessInstanceRepo(testDB)
+func TestWorkflowInstanceRepo_CreateAndGetByID(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
 	ctx := context.Background()
+	repo := repository.NewWorkflowInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	parent := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: p.ID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	repo.Create(ctx, parent)
-
-	child := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: p.ID,
-		ParentID:  &parent.ID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	if err := repo.Create(ctx, child); err != nil {
-		t.Fatalf("Create child failed: %v", err)
-	}
-
-	children, err := repo.ListByParentID(ctx, parent.ID)
-	if err != nil {
-		t.Fatalf("ListByParentID failed: %v", err)
-	}
-	if len(children) != 1 {
-		t.Fatalf("expected 1 child, got %d", len(children))
-	}
-	if children[0].ID != child.ID {
-		t.Errorf("child ID mismatch")
-	}
+	got, err := repo.GetByID(ctx, inst.ID)
+	require.NoError(t, err)
+	assert.Equal(t, inst.ID, got.ID)
+	assert.Equal(t, inst.CurrentStateID, got.CurrentStateID)
+	assert.Equal(t, model.InstanceStatusActive, got.Status)
 }
 
-func TestProcessInstanceRepo_ForeignKeyViolation(t *testing.T) {
-	cleanupTables(t)
-	repo := postgres.NewProcessInstanceRepo(testDB)
+func TestWorkflowInstanceRepo_GetByID_NotFound(t *testing.T) {
+	truncateTables(t)
 	ctx := context.Background()
+	repo := repository.NewWorkflowInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	pi := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: uuid.New(), // nonexistent
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	err := repo.Create(ctx, pi)
-	if err != repository.ErrForeignKey {
-		t.Fatalf("expected ErrForeignKey, got %v", err)
-	}
+	_, err := repo.GetByID(ctx, uuid.New())
+	assert.ErrorIs(t, err, repository.ErrNotFound)
 }
 
-func TestProcessInstanceRepo_Update(t *testing.T) {
-	cleanupTables(t)
-	p := createTestProcess(t)
-	repo := postgres.NewProcessInstanceRepo(testDB)
+func TestWorkflowInstanceRepo_UpdateState(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
 	ctx := context.Background()
+	repo := repository.NewWorkflowInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	pi := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: p.ID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	repo.Create(ctx, pi)
+	require.NoError(t, repo.UpdateState(ctx, inst.ID, "approved"))
 
-	completedAt := time.Now().UTC().Truncate(time.Microsecond)
-	pi.Status = "completed"
-	pi.CompletedAt = &completedAt
-	pi.UpdatedAt = completedAt
-
-	if err := repo.Update(ctx, pi); err != nil {
-		t.Fatalf("Update failed: %v", err)
-	}
-
-	got, _ := repo.GetByID(ctx, pi.ID)
-	if got.Status != "completed" {
-		t.Errorf("Status = %q, want %q", got.Status, "completed")
-	}
-	if got.CompletedAt == nil {
-		t.Error("CompletedAt should not be nil")
-	}
+	got, err := repo.GetByID(ctx, inst.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "approved", got.CurrentStateID)
 }
 
-func TestProcessInstanceRepo_List(t *testing.T) {
-	cleanupTables(t)
-	p := createTestProcess(t)
-	repo := postgres.NewProcessInstanceRepo(testDB)
+func TestWorkflowInstanceRepo_UpdateStatus(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
 	ctx := context.Background()
+	repo := repository.NewWorkflowInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	for i := 0; i < 3; i++ {
-		pi := &model.ProcessInstance{
-			ID:        uuid.New(),
-			ProcessID: p.ID,
-			Status:    "running",
-			StartedAt: now,
-			CreatedAt: now.Add(time.Duration(i) * time.Second),
-			UpdatedAt: now,
-		}
-		repo.Create(ctx, pi)
-	}
+	now := time.Now().UTC()
+	require.NoError(t, repo.UpdateStatus(ctx, inst.ID, model.InstanceStatusCompleted, &now))
 
-	results, err := repo.List(ctx, 0, 10)
-	if err != nil {
-		t.Fatalf("List failed: %v", err)
-	}
-	if len(results) != 3 {
-		t.Fatalf("expected 3, got %d", len(results))
-	}
+	got, err := repo.GetByID(ctx, inst.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.InstanceStatusCompleted, got.Status)
+	require.NotNil(t, got.CompletedAt)
 }
 
-func TestWorkflowInstanceRepo_Create_And_GetByID(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-	piRepo := postgres.NewProcessInstanceRepo(testDB)
+func TestWorkflowInstanceRepo_List_WithFilters(t *testing.T) {
+	truncateTables(t)
+	_, inst1 := setupDefAndInstance(t)
+
 	ctx := context.Background()
+	repo := repository.NewWorkflowInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	pi := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: w.ProcessID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	piRepo.Create(ctx, pi)
+	now := time.Now().UTC()
+	require.NoError(t, repo.UpdateStatus(ctx, inst1.ID, model.InstanceStatusCompleted, &now))
 
-	wiRepo := postgres.NewWorkflowInstanceRepo(testDB)
-	wi := &model.WorkflowInstance{
-		ID:                uuid.New(),
-		WorkflowID:        w.ID,
-		ProcessInstanceID: pi.ID,
-		CurrentState:      "open",
-		Status:            "active",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
+	status := model.InstanceStatusActive
+	insts, total, err := repo.List(ctx, repository.InstanceFilter{Status: &status, Limit: 50})
+	require.NoError(t, err)
+	assert.Equal(t, 0, total)
+	assert.Len(t, insts, 0)
 
-	if err := wiRepo.Create(ctx, wi); err != nil {
-		t.Fatalf("Create failed: %v", err)
-	}
-
-	got, err := wiRepo.GetByID(ctx, wi.ID)
-	if err != nil {
-		t.Fatalf("GetByID failed: %v", err)
-	}
-	if got.CurrentState != "open" {
-		t.Errorf("CurrentState = %q, want %q", got.CurrentState, "open")
-	}
+	status = model.InstanceStatusCompleted
+	insts, total, err = repo.List(ctx, repository.InstanceFilter{Status: &status, Limit: 50})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	assert.Len(t, insts, 1)
 }
 
-func TestWorkflowInstanceRepo_ListByProcessInstanceID(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-	piRepo := postgres.NewProcessInstanceRepo(testDB)
+func TestWorkflowInstanceRepo_SoftDelete(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
 	ctx := context.Background()
+	repo := repository.NewWorkflowInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	pi := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: w.ProcessID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	piRepo.Create(ctx, pi)
+	require.NoError(t, repo.SoftDelete(ctx, inst.ID))
 
-	wiRepo := postgres.NewWorkflowInstanceRepo(testDB)
-	for i := 0; i < 2; i++ {
-		wi := &model.WorkflowInstance{
-			ID:                uuid.New(),
-			WorkflowID:        w.ID,
-			ProcessInstanceID: pi.ID,
-			CurrentState:      "open",
-			Status:            "active",
-			CreatedAt:         now.Add(time.Duration(i) * time.Second),
-			UpdatedAt:         now,
-		}
-		wiRepo.Create(ctx, wi)
-	}
-
-	results, err := wiRepo.ListByProcessInstanceID(ctx, pi.ID)
-	if err != nil {
-		t.Fatalf("ListByProcessInstanceID failed: %v", err)
-	}
-	if len(results) != 2 {
-		t.Fatalf("expected 2, got %d", len(results))
-	}
+	_, err := repo.GetByID(ctx, inst.ID)
+	assert.ErrorIs(t, err, repository.ErrNotFound)
 }
 
-func TestWorkflowInstanceRepo_Update(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-	piRepo := postgres.NewProcessInstanceRepo(testDB)
+func TestWorkflowInstanceRepo_GetByIDForUpdate(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
 	ctx := context.Background()
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	pi := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: w.ProcessID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	piRepo.Create(ctx, pi)
+	tx, err := testDB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer tx.Rollback()
 
-	wiRepo := postgres.NewWorkflowInstanceRepo(testDB)
-	wi := &model.WorkflowInstance{
-		ID:                uuid.New(),
-		WorkflowID:        w.ID,
-		ProcessInstanceID: pi.ID,
-		CurrentState:      "open",
-		Status:            "active",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	wiRepo.Create(ctx, wi)
+	// Use tx-bound repo so FOR UPDATE runs inside the transaction
+	repo := repository.NewWorkflowInstanceRepo(tx)
+	got, err := repo.GetByIDForUpdate(ctx, inst.ID)
+	require.NoError(t, err)
+	assert.Equal(t, inst.ID, got.ID)
 
-	wi.CurrentState = "closed"
-	wi.Status = "completed"
-	wi.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-
-	if err := wiRepo.Update(ctx, wi); err != nil {
-		t.Fatalf("Update failed: %v", err)
-	}
-
-	got, _ := wiRepo.GetByID(ctx, wi.ID)
-	if got.CurrentState != "closed" {
-		t.Errorf("CurrentState = %q, want %q", got.CurrentState, "closed")
-	}
-	if got.Status != "completed" {
-		t.Errorf("Status = %q, want %q", got.Status, "completed")
-	}
-}
-
-func TestTaskInstanceRepo_CRUD(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-
-	taskRepo := postgres.NewTaskRepo(testDB)
-	piRepo := postgres.NewProcessInstanceRepo(testDB)
-	wiRepo := postgres.NewWorkflowInstanceRepo(testDB)
-	tiRepo := postgres.NewTaskInstanceRepo(testDB)
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Microsecond)
-
-	// Create a task definition
-	tk := &model.Task{
-		ID:         uuid.New(),
-		WorkflowID: w.ID,
-		Name:       "Review",
-		TaskType:   "manual",
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}
-	taskRepo.Create(ctx, tk)
-
-	// Create process instance
-	pi := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: w.ProcessID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	piRepo.Create(ctx, pi)
-
-	// Create workflow instance
-	wi := &model.WorkflowInstance{
-		ID:                uuid.New(),
-		WorkflowID:        w.ID,
-		ProcessInstanceID: pi.ID,
-		CurrentState:      "open",
-		Status:            "active",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	wiRepo.Create(ctx, wi)
-
-	// Create task instance
-	ti := &model.TaskInstance{
-		ID:                 uuid.New(),
-		TaskID:             tk.ID,
-		WorkflowInstanceID: wi.ID,
-		Status:             "pending",
-		CreatedAt:          now,
-		UpdatedAt:          now,
-	}
-
-	if err := tiRepo.Create(ctx, ti); err != nil {
-		t.Fatalf("Create failed: %v", err)
-	}
-
-	got, err := tiRepo.GetByID(ctx, ti.ID)
-	if err != nil {
-		t.Fatalf("GetByID failed: %v", err)
-	}
-	if got.Status != "pending" {
-		t.Errorf("Status = %q, want %q", got.Status, "pending")
-	}
-
-	// Update
-	completedAt := time.Now().UTC().Truncate(time.Microsecond)
-	ti.Status = "completed"
-	ti.AssignedTo = "user-123"
-	ti.CompletedAt = &completedAt
-	ti.UpdatedAt = completedAt
-	if err := tiRepo.Update(ctx, ti); err != nil {
-		t.Fatalf("Update failed: %v", err)
-	}
-
-	got, _ = tiRepo.GetByID(ctx, ti.ID)
-	if got.Status != "completed" {
-		t.Errorf("Status = %q, want %q", got.Status, "completed")
-	}
-	if got.AssignedTo != "user-123" {
-		t.Errorf("AssignedTo = %q, want %q", got.AssignedTo, "user-123")
-	}
-
-	// List
-	results, err := tiRepo.ListByWorkflowInstanceID(ctx, wi.ID)
-	if err != nil {
-		t.Fatalf("ListByWorkflowInstanceID failed: %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1, got %d", len(results))
-	}
-}
-
-func TestStateTransitionRepo_Create_And_List(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-
-	piRepo := postgres.NewProcessInstanceRepo(testDB)
-	wiRepo := postgres.NewWorkflowInstanceRepo(testDB)
-	stRepo := postgres.NewStateTransitionRepo(testDB)
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Microsecond)
-
-	pi := &model.ProcessInstance{
-		ID:        uuid.New(),
-		ProcessID: w.ProcessID,
-		Status:    "running",
-		StartedAt: now,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	piRepo.Create(ctx, pi)
-
-	wi := &model.WorkflowInstance{
-		ID:                uuid.New(),
-		WorkflowID:        w.ID,
-		ProcessInstanceID: pi.ID,
-		CurrentState:      "open",
-		Status:            "active",
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-	wiRepo.Create(ctx, wi)
-
-	st := &model.StateTransition{
-		ID:                 uuid.New(),
-		WorkflowInstanceID: wi.ID,
-		FromState:          "open",
-		ToState:            "closed",
-		TransitionName:     "close",
-		TriggeredBy:        "user-1",
-		TriggerType:        "human",
-		CreatedAt:          now,
-	}
-
-	if err := stRepo.Create(ctx, st); err != nil {
-		t.Fatalf("Create failed: %v", err)
-	}
-
-	results, err := stRepo.ListByWorkflowInstanceID(ctx, wi.ID)
-	if err != nil {
-		t.Fatalf("List failed: %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1, got %d", len(results))
-	}
-	if results[0].FromState != "open" {
-		t.Errorf("FromState = %q, want %q", results[0].FromState, "open")
-	}
-	if results[0].TriggerType != "human" {
-		t.Errorf("TriggerType = %q, want %q", results[0].TriggerType, "human")
-	}
+	require.NoError(t, tx.Commit())
 }

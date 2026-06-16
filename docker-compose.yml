@@ -1,35 +1,38 @@
+version: "3.9"
+
 services:
   postgres:
-    image: postgres:16
-    container_name: workflow-engine-db
+    image: postgres:16-alpine
     environment:
+      POSTGRES_DB: workflow
       POSTGRES_USER: workflow
       POSTGRES_PASSWORD: workflow
-      POSTGRES_DB: workflow_engine
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U workflow -d workflow_engine"]
+      test: ["CMD", "pg_isready", "-U", "workflow"]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      timeout: 3s
+      retries: 10
 
-  postgres-test:
-    image: postgres:16
-    container_name: workflow-engine-db-test
+  postgres_test:
+    image: postgres:16-alpine
     environment:
+      POSTGRES_DB: workflow_test
       POSTGRES_USER: workflow
       POSTGRES_PASSWORD: workflow
-      POSTGRES_DB: workflow_engine_test
     ports:
       - "5433:5432"
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U workflow -d workflow_engine_test"]
+      test: ["CMD", "pg_isready", "-U", "workflow"]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      timeout: 3s
+      retries: 10
 
 volumes:
   pgdata:
+  pgdata_test:

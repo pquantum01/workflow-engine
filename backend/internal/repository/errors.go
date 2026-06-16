@@ -2,7 +2,5 @@ package repository
 
 import "errors"
 
-var (
-	ErrNotFound   = errors.New("not found")
-	ErrForeignKey = errors.New("foreign key violation")
-)
+var ErrNotFound = errors.New("not found")
+var ErrConflict = errors.New("conflict")

@@ -1,158 +1,256 @@
-# Phase 4: Frontend Setup + Admin Portal
+# Phase 4 — Frontend Admin
 
-## Overview
+## Goal
+React scaffold + workflow definition browsing + read-only state graph visualization. No instance operations (Phase 5).
 
-React + TypeScript app (Vite) with MUI (Material UI) for the admin portal. Covers process/workflow/task definition management and state machine configuration.
+---
 
-## Tech Stack
+## Stack
+- React 18 + TypeScript + Vite
+- Tailwind CSS + shadcn/ui
+- TanStack Query v5
+- React Router v6
+- React Flow + dagre (graph)
+- Framer Motion (animations)
+- lucide-react (icons)
+- Vitest + React Testing Library
 
-| Tool | Purpose |
-|---|---|
-| React 18 | UI framework |
-| TypeScript | Type safety |
-| Vite | Build tool + dev server |
-| MUI (Material UI) | UI component library (tables, forms, dialogs, layout) |
-| React Router | Client-side routing |
-| Vitest + React Testing Library | Unit tests |
+Vite dev proxy: `server.proxy: { '/api': 'http://localhost:8080' }`
 
-## Directory Structure
+---
+
+## Routes (Phase 4)
+
+| Route | Component |
+|-------|-----------|
+| `/` | Redirect → `/workflow-defs` |
+| `/workflow-defs` | `WorkflowDefListPage` |
+| `/workflow-defs/:id` | `WorkflowDefDetailPage` |
+| `/*` | `NotFoundPage` |
+
+---
+
+## Layout Shell (`src/components/layout/`)
 
 ```
-frontend/
-├── src/
-│   ├── api/                    # API client functions (one file per resource)
-│   │   ├── client.ts           # Base fetch wrapper
-│   │   ├── processes.ts
-│   │   ├── workflows.ts
-│   │   └── tasks.ts
-│   ├── types/                  # TypeScript type definitions matching backend models
-│   │   └── index.ts
-│   ├── pages/                  # Page-level components (one per route)
-│   │   ├── ProcessListPage.tsx
-│   │   ├── ProcessDetailPage.tsx
-│   │   └── NotFoundPage.tsx
-│   ├── components/             # Reusable UI components
-│   │   ├── Layout.tsx          # App shell with sidebar nav
-│   │   ├── ProcessForm.tsx
-│   │   ├── WorkflowForm.tsx
-│   │   ├── TaskForm.tsx
-│   │   └── StateMachineEditor.tsx
-│   ├── App.tsx                 # Routes + layout
-│   ├── main.tsx                # Entry point
-│   └── index.css               # Global styles
-├── index.html
-├── package.json
-├── tsconfig.json
-├── vite.config.ts
-└── vitest.config.ts
+┌─ Topbar ────────────────────────────────────────────────────────┐
+│  [≡] Workflow Engine    ●health   [☀/☾ theme toggle]            │
+├─ Sidebar ──┬─ Main Content ──────────────────────────────────────┤
+│ Workflows  │                                                      │
+│ Instances  │  (page content)                                      │
+│ Task Types │                                                      │
+│ Admin      │                                                      │
+└────────────┴──────────────────────────────────────────────────────┘
 ```
 
-## Pages & Routes
+Sidebar collapsible (icon-only mode). Active route highlighted. Sidebar items Phase 4 navigable; Instances + Admin grayed out until Phase 5 wires them.
 
-| Route | Page | Description |
-|---|---|---|
-| `/` | ProcessListPage | Table of all process definitions with create/edit/delete |
-| `/processes/:id` | ProcessDetailPage | Process detail with workflow list, task list per workflow, state machine view |
-| `*` | NotFoundPage | 404 fallback |
+Health dot: green (`/readyz` 200) / red (non-200) — polled every 30s.
 
-## Page Details
+Theme: system default on first load. Toggle stores in `localStorage`. Dark + light both fully designed.
 
-### ProcessListPage (`/`)
-- MUI (Material UI) `Table` listing all processes (name, status, version, created_at)
-- Status column with color tags (draft=blue, active=green, archived=gray)
-- "New Process" button → modal with `ProcessForm`
-- Row actions: Edit (modal), Delete (confirm popover), Activate/Archive (status change)
+---
 
-### ProcessDetailPage (`/processes/:id`)
-- Header: process name, status tag, description
-- **Workflows section**: collapsible panels, one per workflow
-  - Each panel shows: workflow name, state machine summary
-  - "Add Workflow" button → modal with `WorkflowForm`
-  - Per-workflow actions: Edit, Delete
-  - **Tasks sub-section** inside each workflow panel
-    - Table of tasks (name, type)
-    - "Add Task" button → modal with `TaskForm`
-    - Per-task actions: Edit, Delete
-  - **State Machine section** inside each workflow panel
-    - Visual display of states and transitions
-    - `StateMachineEditor` component for editing
+## Workflow Def List Page (`/workflow-defs`)
 
-## API Client Layer
+**Features:**
+- Table view (default) / Card grid toggle (persisted in `localStorage`)
+- Search by name (client-side filter on loaded data — list is small)
+- `include_deleted` toggle (shows soft-deleted rows with muted styling + "Deleted" badge)
+- Sort: name (asc/desc), version (desc), created_at (desc)
 
-### Base client (`api/client.ts`)
-```typescript
-const API_BASE = '/api/v1'
+**Table columns:** Name, Version, Description (truncated), States (#), Transitions (#), Created At, Status (Active / Deleted badge)
 
-async function request<T>(path: string, options?: RequestInit): Promise<T>
-// Handles: JSON encoding, error extraction, base URL
-```
+**Card fields:** Name, version badge, description, state count, created date, status badge
 
-### Resource clients
-Each file exports functions that call the backend API:
-```typescript
-// processes.ts
-listProcesses(offset?, limit?): Promise<Process[]>
-getProcess(id): Promise<Process>
-createProcess(input): Promise<Process>
-updateProcess(id, input): Promise<Process>
-deleteProcess(id): Promise<void>
-```
+Click row/card → navigate to detail.
 
-Same pattern for workflows and tasks.
+Empty state: illustration + "No workflow definitions found. Add JSON files to the workflows/ directory and reload."
 
-## TypeScript Types (`types/index.ts`)
+Loading: skeleton rows (5).
 
-Mirror backend models:
-```typescript
-interface Process { id: string; name: string; description: string; version: number; status: string; created_at: string; updated_at: string }
-interface Workflow { id: string; process_id: string; name: string; description: string; state_machine: StateMachine; sort_order: number; ... }
-interface Task { id: string; workflow_id: string; name: string; description: string; task_type: string; ... }
-interface StateMachine { states: State[]; transitions: Transition[]; initial_state: string; terminal_states: string[] }
-interface State { name: string; description: string; metadata?: Record<string, string> }
-interface Transition { name: string; from_state: string; to_state: string; completion_rule?: CompletionRule }
-interface CompletionRule { type: string; task_refs: string[]; n?: number }
-```
+---
 
-## Components
+## Workflow Def Detail Page (`/workflow-defs/:id`)
 
 ### Layout
-- MUI (Material UI) `Layout` with `Sider` (sidebar nav) + `Content`
-- Sidebar: "Processes" link (expandable later with Instances)
+```
+┌─ Header ─────────────────────────────────────────────────────────────┐
+│  "leave-approval"  v1   Active                                        │
+│  Description text                   [↓ Download JSON]                │
+├──────────────────────────────────────┬───────────────────────────────┤
+│  State Graph (React Flow)            │  State Inspector Panel        │
+│  (resizable / full-screen toggle)    │  (selected state details)     │
+│                                      │                               │
+├──────────────────────────────────────┴───────────────────────────────┤
+│  Warnings banner (if any)                                            │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
-### ProcessForm
-- Fields: name (required), description (optional)
-- Used for both create and edit (edit pre-fills values)
+### State Graph (React Flow + dagre)
 
-### WorkflowForm
-- Fields: name (required), description (optional)
-- State machine configured separately via StateMachineEditor
+**Auto-layout:** dagre `rankdir: 'LR'` (left-to-right). Nodes sized to content.
 
-### TaskForm
-- Fields: name (required), description (optional), task_type (select: manual/automated/approval)
+**Node types:**
+- `start` node: green outline + "START" chip
+- `end` node: gold outline + "END" chip
+- `regular` node: neutral bg, state label, task count badge
 
-### StateMachineEditor
-- Add/remove states (name + description)
-- Add/remove transitions (name, from_state dropdown, to_state dropdown)
-- Set initial state (dropdown)
-- Set terminal states (multi-select)
-- Completion rule per transition (optional): type dropdown + task_refs multi-select + N input for n_of_m
-- Task refs populated from the workflow's task list
+**Edge types:**
+- Linear / user-picks: simple arrow, no label
+- Task-bound: labeled with `trigger.task_key`
+- All edges: animated dot on hover
 
-## Vite Dev Proxy
+**Interactivity (read-only):**
+- Pan + zoom (React Flow default controls)
+- Click node → highlights + populates inspector panel
+- Fit-to-view button
 
-`vite.config.ts` proxies `/api` to `http://localhost:8080` so frontend dev server talks to the Go backend.
+### State Inspector Panel
+Shown on right when node selected:
+```
+State ID:    "hr_review"
+Label:       HR Review
+Type:        Regular
 
-## Test Plan
+Tasks (2):
+  ┌─ hr_check · HR Verification · approval ─┐
+  │                                          │
+  └──────────────────────────────────────────┘
+  ┌─ policy_check · Policy Compliance · checklist ─┐
+  │                                                 │
+  └─────────────────────────────────────────────────┘
 
-Unit tests with Vitest + React Testing Library:
+Outgoing Transitions:
+  → approved   (linear)
+```
 
-| Test | What it verifies |
-|---|---|
-| ProcessListPage renders | Shows table, create button |
-| ProcessListPage create flow | Modal opens, form submits, table refreshes |
-| ProcessDetailPage renders | Shows process info, workflows, tasks |
-| ProcessForm validation | Name required |
-| WorkflowForm submit | Calls API with correct payload |
-| TaskForm submit | Calls API with correct payload |
-| StateMachineEditor | Add/remove states and transitions |
-| API client functions | Correct URL construction, error handling |
+### Warnings Banner
+If def has warnings: amber banner at top with list of warning messages. Dismissible per session.
+
+### Download JSON
+Button triggers `window.open('/api/v1/workflow-defs/:id')` — returns full def with JSONB.
+
+---
+
+## API Client (`src/api/`)
+
+```ts
+// client.ts
+async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T>
+// throws ApiError with code + message on non-2xx
+
+// processes.ts (workflow defs)
+export const workflowDefsApi = {
+  list: (includeDeleted?: boolean) => apiFetch<WorkflowDefListResponse>('/api/v1/workflow-defs'),
+  getById: (id: string) => apiFetch<WorkflowDefResponse>(`/api/v1/workflow-defs/${id}`),
+}
+```
+
+---
+
+## Types (`src/types/index.ts`)
+
+```ts
+export interface WorkflowDef {
+  id: string
+  name: string
+  version: number
+  description: string
+  definition: WorkflowDefinition
+  created_at: string
+  deleted_at?: string
+}
+
+export interface WorkflowDefinition {
+  name: string
+  version: number
+  start_state: string
+  end_state: string
+  states: StateDef[]
+  transitions: TransitionDef[]
+}
+
+export interface StateDef {
+  id: string
+  label: string
+  tasks: TaskDef[]
+}
+
+export interface TaskDef {
+  key: string
+  label: string
+  type: string
+}
+
+export interface TransitionDef {
+  from_state: string
+  to_state: string
+  trigger?: { task_key: string }
+}
+```
+
+---
+
+## TanStack Query Setup
+
+```ts
+// App.tsx
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { staleTime: 30_000, retry: 1 },
+  },
+})
+
+// hooks/useWorkflowDefs.ts
+export function useWorkflowDefs(includeDeleted = false) {
+  return useQuery({
+    queryKey: ['workflow-defs', { includeDeleted }],
+    queryFn: () => workflowDefsApi.list(includeDeleted),
+  })
+}
+
+export function useWorkflowDef(id: string) {
+  return useQuery({
+    queryKey: ['workflow-defs', id],
+    queryFn: () => workflowDefsApi.getById(id),
+    enabled: !!id,
+  })
+}
+```
+
+---
+
+## Graph Layout Helper (`src/components/graph/layout.ts`)
+
+```ts
+import dagre from '@dagrejs/dagre'
+
+export function layoutGraph(def: WorkflowDefinition): { nodes: Node[], edges: Edge[] } {
+  const g = new dagre.graphlib.Graph()
+  g.setGraph({ rankdir: 'LR', nodesep: 60, ranksep: 80 })
+  g.setDefaultEdgeLabel(() => ({}))
+  // add nodes + edges
+  dagre.layout(g)
+  // return React Flow nodes + edges with positions
+}
+```
+
+---
+
+## Tests (Vitest + RTL)
+
+- `WorkflowDefListPage`: renders list, shows skeleton on load, shows empty state, filters by search
+- `WorkflowDefDetailPage`: renders graph nodes/edges, inspector updates on node click, warning banner shown
+- `api/client.ts`: throws `ApiError` on non-2xx, passes correct headers
+- `graph/layout.ts`: correct node positions for linear chain, multi-edge state
+
+---
+
+## Exit Criteria
+- [ ] `npm run dev` works with Vite proxy to local backend
+- [ ] `/workflow-defs` lists defs from real backend
+- [ ] `/workflow-defs/:id` shows React Flow graph with correct nodes/edges
+- [ ] Dark + light themes both look correct
+- [ ] `npm test` green
+- [ ] No TypeScript errors (`npm run build` succeeds)

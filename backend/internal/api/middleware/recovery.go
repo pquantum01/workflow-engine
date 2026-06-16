@@ -1,22 +1,21 @@
 package middleware
 
 import (
-	"log/slog"
 	"net/http"
-	"runtime/debug"
+
+	"github.com/sirupsen/logrus"
 )
 
-// Recovery returns middleware that recovers from panics, logs the stack trace, and returns 500.
-func Recovery(logger *slog.Logger) func(http.Handler) http.Handler {
+func Recovery(log *logrus.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
-				if err := recover(); err != nil {
-					logger.Error("panic recovered",
-						slog.Any("error", err),
-						slog.String("stack", string(debug.Stack())),
-					)
-					http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+				if rec := recover(); rec != nil {
+					log.WithFields(logrus.Fields{
+						"panic":      rec,
+						"request_id": GetRequestID(r.Context()),
+					}).Error("panic recovered")
+					http.Error(w, `{"error":{"code":"INTERNAL","message":"internal server error"}}`, http.StatusInternalServerError)
 				}
 			}()
 			next.ServeHTTP(w, r)

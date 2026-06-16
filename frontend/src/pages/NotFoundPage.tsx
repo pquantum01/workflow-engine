@@ -1,16 +1,13 @@
-import Box from '@mui/material/Box';
-import Typography from '@mui/material/Typography';
-import Button from '@mui/material/Button';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom'
 
-export default function NotFoundPage() {
-  const navigate = useNavigate();
-
+export function NotFoundPage() {
   return (
-    <Box sx={{ textAlign: 'center', mt: 8 }}>
-      <Typography variant="h3" gutterBottom>404</Typography>
-      <Typography variant="h6" color="text.secondary" gutterBottom>Page not found</Typography>
-      <Button variant="contained" onClick={() => navigate('/')}>Go Home</Button>
-    </Box>
-  );
+    <div className="flex flex-col items-center justify-center h-64 text-center">
+      <div className="text-4xl font-bold text-zinc-200 dark:text-zinc-800 mb-2">404</div>
+      <p className="text-zinc-500 mb-4">Page not found.</p>
+      <Link to="/" className="text-indigo-600 hover:text-indigo-700 text-sm">
+        Go home
+      </Link>
+    </div>
+  )
 }

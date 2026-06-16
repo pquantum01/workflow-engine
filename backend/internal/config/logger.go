@@ -1,29 +1,32 @@
 package config
 
 import (
-	"log/slog"
 	"os"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
-func SetupLogger(level string) *slog.Logger {
-	var logLevel slog.Level
-	switch strings.ToLower(level) {
+func NewLogger(cfg Config) *logrus.Logger {
+	log := logrus.New()
+	log.SetOutput(os.Stdout)
+
+	switch strings.ToLower(cfg.LogLevel) {
 	case "debug":
-		logLevel = slog.LevelDebug
+		log.SetLevel(logrus.DebugLevel)
 	case "warn":
-		logLevel = slog.LevelWarn
+		log.SetLevel(logrus.WarnLevel)
 	case "error":
-		logLevel = slog.LevelError
+		log.SetLevel(logrus.ErrorLevel)
 	default:
-		logLevel = slog.LevelInfo
+		log.SetLevel(logrus.InfoLevel)
 	}
 
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: logLevel,
-	})
+	if strings.ToLower(cfg.LogFormat) == "text" {
+		log.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+	} else {
+		log.SetFormatter(&logrus.JSONFormatter{})
+	}
 
-	logger := slog.New(handler)
-	slog.SetDefault(logger)
-	return logger
+	return log
 }

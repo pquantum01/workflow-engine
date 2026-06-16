@@ -2,116 +2,122 @@ package handler
 
 import (
 	"encoding/json"
-	"log/slog"
+	"errors"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-
-	"workflow-engine/backend/internal/service"
+	"github.com/workflow-engine/backend/internal/api/dto"
+	"github.com/workflow-engine/backend/internal/model"
+	"github.com/workflow-engine/backend/internal/service"
 )
 
 type TaskHandler struct {
-	service *service.TaskService
-	logger  *slog.Logger
+	svc *service.TaskService
 }
 
-func NewTaskHandler(svc *service.TaskService, logger *slog.Logger) *TaskHandler {
-	return &TaskHandler{service: svc, logger: logger}
+func NewTaskHandler(svc *service.TaskService) *TaskHandler {
+	return &TaskHandler{svc: svc}
 }
 
-func (h *TaskHandler) Create(w http.ResponseWriter, r *http.Request) {
-	workflowID, err := uuid.Parse(mux.Vars(r)["id"])
+func (h *TaskHandler) Get(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID(mux.Vars(r)["id"])
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid workflow id")
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid id", nil)
 		return
 	}
-
-	var input service.CreateTaskInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	t, err := h.service.Create(r.Context(), workflowID, input)
+	task, err := h.svc.GetByID(r.Context(), id)
 	if err != nil {
-		status, msg := MapServiceError(err)
-		WriteError(w, status, msg)
+		if errors.Is(err, service.ErrNotFound) {
+			writeNotFound(w)
+			return
+		}
+		writeInternalError(w)
 		return
 	}
-
-	WriteJSON(w, http.StatusCreated, t)
+	writeJSON(w, http.StatusOK, toTaskResponse(task))
 }
 
-func (h *TaskHandler) ListByWorkflowID(w http.ResponseWriter, r *http.Request) {
-	workflowID, err := uuid.Parse(mux.Vars(r)["id"])
+func (h *TaskHandler) StartTask(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID(mux.Vars(r)["id"])
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid workflow id")
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid id", nil)
 		return
 	}
-
-	results, err := h.service.ListByWorkflowID(r.Context(), workflowID)
+	task, err := h.svc.Start(r.Context(), id)
 	if err != nil {
-		status, msg := MapServiceError(err)
-		WriteError(w, status, msg)
+		if errors.Is(err, service.ErrNotFound) {
+			writeNotFound(w)
+			return
+		}
+		if errors.Is(err, service.ErrTaskNotCompletable) {
+			writeError(w, http.StatusConflict, "TASK_NOT_COMPLETABLE", "task cannot be started", nil)
+			return
+		}
+		writeInternalError(w)
 		return
 	}
-
-	WriteJSON(w, http.StatusOK, results)
+	writeJSON(w, http.StatusOK, toTaskResponse(task))
 }
 
-func (h *TaskHandler) GetByID(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(mux.Vars(r)["id"])
+func (h *TaskHandler) Complete(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID(mux.Vars(r)["id"])
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid id", nil)
+		return
+	}
+	var req dto.CompleteTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON", nil)
+		return
+	}
+	if req.Status == "" {
+		writeError(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "status is required", nil)
 		return
 	}
 
-	t, err := h.service.GetByID(r.Context(), id)
+	inst, _, err := h.svc.Complete(r.Context(), id, model.TaskStatus(req.Status), req.NextState, req.CompletedBy)
 	if err != nil {
-		status, msg := MapServiceError(err)
-		WriteError(w, status, msg)
+		switch {
+		case errors.Is(err, service.ErrNotFound):
+			writeNotFound(w)
+		case errors.Is(err, service.ErrInstanceTerminal):
+			writeError(w, http.StatusConflict, "INSTANCE_TERMINAL", "instance is in terminal state", nil)
+		case errors.Is(err, service.ErrTaskNotCompletable):
+			writeError(w, http.StatusConflict, "TASK_NOT_COMPLETABLE", "task is not in a completable state", nil)
+		case errors.Is(err, service.ErrInvalidNextState):
+			writeError(w, http.StatusUnprocessableEntity, "INVALID_NEXT_STATE", err.Error(), nil)
+		case errors.Is(err, service.ErrValidation):
+			writeError(w, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "invalid status value", nil)
+		default:
+			writeInternalError(w)
+		}
 		return
 	}
-
-	WriteJSON(w, http.StatusOK, t)
+	writeJSON(w, http.StatusOK, toInstanceResponse(inst, nil, nil))
 }
 
-func (h *TaskHandler) Update(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(mux.Vars(r)["id"])
-	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid id")
-		return
+func (h *TaskHandler) ListTaskTypes(w http.ResponseWriter, r *http.Request) {
+	types := []map[string]string{
+		{"type": "approval", "description": "Done/rejected with optional comment"},
+		{"type": "form", "description": "Collect structured data on completion"},
+		{"type": "checklist", "description": "Multi-item, done when all checked"},
+		{"type": "manual", "description": "Generic, mark done or rejected"},
 	}
-
-	var input service.UpdateTaskInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	t, err := h.service.Update(r.Context(), id, input)
-	if err != nil {
-		status, msg := MapServiceError(err)
-		WriteError(w, status, msg)
-		return
-	}
-
-	WriteJSON(w, http.StatusOK, t)
+	writeJSON(w, http.StatusOK, types)
 }
 
-func (h *TaskHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(mux.Vars(r)["id"])
-	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid id")
-		return
+func toTaskResponse(t *model.TaskInstance) *dto.TaskInstanceResponse {
+	return &dto.TaskInstanceResponse{
+		ID:                 t.ID.String(),
+		WorkflowInstanceID: t.WorkflowInstanceID.String(),
+		StateID:            t.StateID,
+		TaskKey:            t.TaskKey,
+		TaskLabel:          t.TaskLabel,
+		TaskType:           t.TaskType,
+		Status:             string(t.Status),
+		Outcome:            t.Outcome,
+		CreatedBy:          t.CreatedBy,
+		CreatedAt:          t.CreatedAt,
+		CompletedAt:        t.CompletedAt,
 	}
-
-	if err := h.service.Delete(r.Context(), id); err != nil {
-		status, msg := MapServiceError(err)
-		WriteError(w, status, msg)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
 }

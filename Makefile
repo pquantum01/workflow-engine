@@ -1,52 +1,64 @@
-.PHONY: build test test-integration migrate-up migrate-down docker-up docker-down lint run fe-install fe-dev fe-build fe-test
+.PHONY: build run test test-integration docker-up docker-down \
+        migrate-up migrate-up-test migrate-down \
+        frontend-dev frontend-build frontend-test \
+        stack-up stack-down smoke e2e
 
-# Backend
+BINARY      := ./bin/server
+DB_URL      := postgres://workflow:workflow@localhost:5432/workflow?sslmode=disable
+TEST_DB_URL := postgres://workflow:workflow@localhost:5433/workflow_test?sslmode=disable
+
 build:
-	go build -o bin/server ./backend/cmd/server
+	mkdir -p bin
+	go build -o $(BINARY) ./backend/cmd/server
 
 run: build
-	./bin/server
+	DATABASE_URL=$(DB_URL) \
+	LOG_LEVEL=debug \
+	LOG_FORMAT=text \
+	WORKFLOWS_DIR=./workflows \
+	WEBHOOK_CONFIG=./webhooks.json \
+	$(BINARY)
 
 test:
-	go test -cover ./backend/internal/...
+	go test ./backend/...
 
 test-integration:
-	go test -tags=integration -cover -coverpkg=./backend/internal/... ./backend/tests/integration/...
+	DATABASE_URL=$(TEST_DB_URL) go test ./backend/tests/integration/... -v -count=1
 
-lint:
-	go vet ./backend/...
-
-# Database migrations
-MIGRATE=go run -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-
-migrate-up:
-	$(MIGRATE) -path backend/migrations -database "postgres://workflow:workflow@localhost:5432/workflow_engine?sslmode=disable" up
-
-migrate-down:
-	$(MIGRATE) -path backend/migrations -database "postgres://workflow:workflow@localhost:5432/workflow_engine?sslmode=disable" down 1
-
-migrate-up-test:
-	$(MIGRATE) -path backend/migrations -database "postgres://workflow:workflow@localhost:5433/workflow_engine_test?sslmode=disable" up
-
-migrate-down-test:
-	$(MIGRATE) -path backend/migrations -database "postgres://workflow:workflow@localhost:5433/workflow_engine_test?sslmode=disable" down 1
-
-# Frontend
-fe-install:
-	cd frontend && npm install
-
-fe-dev:
-	cd frontend && npm run dev
-
-fe-build:
-	cd frontend && npm run build
-
-fe-test:
-	cd frontend && npm test
-
-# Docker
 docker-up:
-	docker compose up -d
+	docker-compose up -d postgres postgres_test
 
 docker-down:
-	docker compose down
+	docker-compose down
+
+migrate-up:
+	migrate -path backend/migrations -database "$(DB_URL)" up
+
+migrate-up-test:
+	migrate -path backend/migrations -database "$(TEST_DB_URL)" up
+
+migrate-down:
+	migrate -path backend/migrations -database "$(DB_URL)" down 1
+
+frontend-dev:
+	cd frontend && npm run dev
+
+frontend-build:
+	cd frontend && npm run build
+
+frontend-test:
+	cd frontend && npm test
+
+stack-up:
+	docker-compose -f docker-compose.yml up --build -d
+
+stack-down:
+	docker-compose -f docker-compose.yml down -v
+
+smoke: stack-up
+	./tests/smoke/smoke.sh
+
+e2e:
+	docker compose -f docker-compose.e2e.yml up --build -d
+	cd tests/e2e && npm ci && npx playwright test
+	docker compose -f docker-compose.e2e.yml down -v

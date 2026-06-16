@@ -2,325 +2,224 @@ package testutil
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
-	"workflow-engine/backend/internal/engine"
-	"workflow-engine/backend/internal/model"
-	"workflow-engine/backend/internal/repository"
+	"github.com/workflow-engine/backend/internal/model"
+	"github.com/workflow-engine/backend/internal/repository"
 )
 
-// MockProcessRepo implements repository.ProcessRepository for testing
-type MockProcessRepo struct {
-	Processes map[uuid.UUID]*model.Process
+// MockWorkflowDefRepo is a hand-written mock for WorkflowDefRepo.
+type MockWorkflowDefRepo struct {
+	CreateFn           func(ctx context.Context, def *model.WorkflowDef) error
+	GetByIDFn          func(ctx context.Context, id uuid.UUID) (*model.WorkflowDef, error)
+	GetByNameVersionFn func(ctx context.Context, name string, version int) (*model.WorkflowDef, error)
+	ListFn             func(ctx context.Context, includeDeleted bool) ([]*model.WorkflowDef, error)
+	SoftDeleteFn       func(ctx context.Context, id uuid.UUID) error
 }
 
-func NewMockProcessRepo() *MockProcessRepo {
-	return &MockProcessRepo{Processes: make(map[uuid.UUID]*model.Process)}
-}
-
-func (m *MockProcessRepo) Create(_ context.Context, p *model.Process) error {
-	m.Processes[p.ID] = p
+func (m *MockWorkflowDefRepo) Create(ctx context.Context, def *model.WorkflowDef) error {
+	if m.CreateFn != nil {
+		return m.CreateFn(ctx, def)
+	}
 	return nil
 }
-
-func (m *MockProcessRepo) GetByID(_ context.Context, id uuid.UUID) (*model.Process, error) {
-	p, ok := m.Processes[id]
-	if !ok {
-		return nil, repository.ErrNotFound
+func (m *MockWorkflowDefRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.WorkflowDef, error) {
+	if m.GetByIDFn != nil {
+		return m.GetByIDFn(ctx, id)
 	}
-	return p, nil
+	return nil, repository.ErrNotFound
 }
-
-func (m *MockProcessRepo) List(_ context.Context, offset, limit int) ([]*model.Process, error) {
-	var result []*model.Process
-	i := 0
-	for _, p := range m.Processes {
-		if i >= offset && len(result) < limit {
-			result = append(result, p)
-		}
-		i++
+func (m *MockWorkflowDefRepo) GetByNameVersion(ctx context.Context, name string, version int) (*model.WorkflowDef, error) {
+	if m.GetByNameVersionFn != nil {
+		return m.GetByNameVersionFn(ctx, name, version)
 	}
-	return result, nil
+	return nil, repository.ErrNotFound
 }
-
-func (m *MockProcessRepo) Update(_ context.Context, p *model.Process) error {
-	if _, ok := m.Processes[p.ID]; !ok {
-		return repository.ErrNotFound
+func (m *MockWorkflowDefRepo) List(ctx context.Context, includeDeleted bool) ([]*model.WorkflowDef, error) {
+	if m.ListFn != nil {
+		return m.ListFn(ctx, includeDeleted)
 	}
-	m.Processes[p.ID] = p
+	return nil, nil
+}
+func (m *MockWorkflowDefRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
+	if m.SoftDeleteFn != nil {
+		return m.SoftDeleteFn(ctx, id)
+	}
 	return nil
 }
+func (m *MockWorkflowDefRepo) WithTx(tx repository.DB) repository.WorkflowDefRepo { return m }
 
-func (m *MockProcessRepo) Delete(_ context.Context, id uuid.UUID) error {
-	if _, ok := m.Processes[id]; !ok {
-		return repository.ErrNotFound
-	}
-	delete(m.Processes, id)
-	return nil
-}
-
-// MockWorkflowRepo implements repository.WorkflowRepository for testing
-type MockWorkflowRepo struct {
-	Workflows map[uuid.UUID]*model.Workflow
-}
-
-func NewMockWorkflowRepo() *MockWorkflowRepo {
-	return &MockWorkflowRepo{Workflows: make(map[uuid.UUID]*model.Workflow)}
-}
-
-func (m *MockWorkflowRepo) Create(_ context.Context, w *model.Workflow) error {
-	m.Workflows[w.ID] = w
-	return nil
-}
-
-func (m *MockWorkflowRepo) GetByID(_ context.Context, id uuid.UUID) (*model.Workflow, error) {
-	w, ok := m.Workflows[id]
-	if !ok {
-		return nil, repository.ErrNotFound
-	}
-	return w, nil
-}
-
-func (m *MockWorkflowRepo) ListByProcessID(_ context.Context, processID uuid.UUID) ([]*model.Workflow, error) {
-	var result []*model.Workflow
-	for _, w := range m.Workflows {
-		if w.ProcessID == processID {
-			result = append(result, w)
-		}
-	}
-	return result, nil
-}
-
-func (m *MockWorkflowRepo) Update(_ context.Context, w *model.Workflow) error {
-	if _, ok := m.Workflows[w.ID]; !ok {
-		return repository.ErrNotFound
-	}
-	m.Workflows[w.ID] = w
-	return nil
-}
-
-func (m *MockWorkflowRepo) Delete(_ context.Context, id uuid.UUID) error {
-	if _, ok := m.Workflows[id]; !ok {
-		return repository.ErrNotFound
-	}
-	delete(m.Workflows, id)
-	return nil
-}
-
-// MockTaskRepo implements repository.TaskRepository for testing
-type MockTaskRepo struct {
-	Tasks map[uuid.UUID]*model.Task
-}
-
-func NewMockTaskRepo() *MockTaskRepo {
-	return &MockTaskRepo{Tasks: make(map[uuid.UUID]*model.Task)}
-}
-
-func (m *MockTaskRepo) Create(_ context.Context, t *model.Task) error {
-	m.Tasks[t.ID] = t
-	return nil
-}
-
-func (m *MockTaskRepo) GetByID(_ context.Context, id uuid.UUID) (*model.Task, error) {
-	t, ok := m.Tasks[id]
-	if !ok {
-		return nil, repository.ErrNotFound
-	}
-	return t, nil
-}
-
-func (m *MockTaskRepo) ListByWorkflowID(_ context.Context, wfID uuid.UUID) ([]*model.Task, error) {
-	var result []*model.Task
-	for _, t := range m.Tasks {
-		if t.WorkflowID == wfID {
-			result = append(result, t)
-		}
-	}
-	return result, nil
-}
-
-func (m *MockTaskRepo) Update(_ context.Context, t *model.Task) error {
-	if _, ok := m.Tasks[t.ID]; !ok {
-		return repository.ErrNotFound
-	}
-	m.Tasks[t.ID] = t
-	return nil
-}
-
-func (m *MockTaskRepo) Delete(_ context.Context, id uuid.UUID) error {
-	if _, ok := m.Tasks[id]; !ok {
-		return repository.ErrNotFound
-	}
-	delete(m.Tasks, id)
-	return nil
-}
-
-// MockProcessInstanceRepo implements repository.ProcessInstanceRepository for testing
-type MockProcessInstanceRepo struct {
-	Instances map[uuid.UUID]*model.ProcessInstance
-}
-
-func NewMockProcessInstanceRepo() *MockProcessInstanceRepo {
-	return &MockProcessInstanceRepo{Instances: make(map[uuid.UUID]*model.ProcessInstance)}
-}
-
-func (m *MockProcessInstanceRepo) Create(_ context.Context, pi *model.ProcessInstance) error {
-	m.Instances[pi.ID] = pi
-	return nil
-}
-
-func (m *MockProcessInstanceRepo) GetByID(_ context.Context, id uuid.UUID) (*model.ProcessInstance, error) {
-	pi, ok := m.Instances[id]
-	if !ok {
-		return nil, repository.ErrNotFound
-	}
-	return pi, nil
-}
-
-func (m *MockProcessInstanceRepo) List(_ context.Context, offset, limit int) ([]*model.ProcessInstance, error) {
-	var result []*model.ProcessInstance
-	i := 0
-	for _, pi := range m.Instances {
-		if i >= offset && len(result) < limit {
-			result = append(result, pi)
-		}
-		i++
-	}
-	return result, nil
-}
-
-func (m *MockProcessInstanceRepo) ListByParentID(_ context.Context, parentID uuid.UUID) ([]*model.ProcessInstance, error) {
-	var result []*model.ProcessInstance
-	for _, pi := range m.Instances {
-		if pi.ParentID != nil && *pi.ParentID == parentID {
-			result = append(result, pi)
-		}
-	}
-	return result, nil
-}
-
-func (m *MockProcessInstanceRepo) Update(_ context.Context, pi *model.ProcessInstance) error {
-	if _, ok := m.Instances[pi.ID]; !ok {
-		return repository.ErrNotFound
-	}
-	m.Instances[pi.ID] = pi
-	return nil
-}
-
-// MockWorkflowInstanceRepo implements repository.WorkflowInstanceRepository for testing
+// MockWorkflowInstanceRepo is a hand-written mock for WorkflowInstanceRepo.
 type MockWorkflowInstanceRepo struct {
-	Instances map[uuid.UUID]*model.WorkflowInstance
+	CreateFn           func(ctx context.Context, inst *model.WorkflowInstance) error
+	GetByIDFn          func(ctx context.Context, id uuid.UUID) (*model.WorkflowInstance, error)
+	GetByIDForUpdateFn func(ctx context.Context, id uuid.UUID) (*model.WorkflowInstance, error)
+	ListFn             func(ctx context.Context, filter repository.InstanceFilter) ([]*model.WorkflowInstance, int, error)
+	UpdateStateFn      func(ctx context.Context, id uuid.UUID, newStateID string) error
+	UpdateStatusFn     func(ctx context.Context, id uuid.UUID, status model.InstanceStatus, completedAt *time.Time) error
+	SoftDeleteFn       func(ctx context.Context, id uuid.UUID) error
 }
 
-func NewMockWorkflowInstanceRepo() *MockWorkflowInstanceRepo {
-	return &MockWorkflowInstanceRepo{Instances: make(map[uuid.UUID]*model.WorkflowInstance)}
-}
-
-func (m *MockWorkflowInstanceRepo) Create(_ context.Context, wi *model.WorkflowInstance) error {
-	m.Instances[wi.ID] = wi
+func (m *MockWorkflowInstanceRepo) Create(ctx context.Context, inst *model.WorkflowInstance) error {
+	if m.CreateFn != nil {
+		return m.CreateFn(ctx, inst)
+	}
 	return nil
 }
-
-func (m *MockWorkflowInstanceRepo) GetByID(_ context.Context, id uuid.UUID) (*model.WorkflowInstance, error) {
-	wi, ok := m.Instances[id]
-	if !ok {
-		return nil, repository.ErrNotFound
+func (m *MockWorkflowInstanceRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.WorkflowInstance, error) {
+	if m.GetByIDFn != nil {
+		return m.GetByIDFn(ctx, id)
 	}
-	return wi, nil
+	return nil, repository.ErrNotFound
 }
-
-func (m *MockWorkflowInstanceRepo) ListByProcessInstanceID(_ context.Context, piID uuid.UUID) ([]*model.WorkflowInstance, error) {
-	var result []*model.WorkflowInstance
-	for _, wi := range m.Instances {
-		if wi.ProcessInstanceID == piID {
-			result = append(result, wi)
-		}
+func (m *MockWorkflowInstanceRepo) GetByIDForUpdate(ctx context.Context, id uuid.UUID) (*model.WorkflowInstance, error) {
+	if m.GetByIDForUpdateFn != nil {
+		return m.GetByIDForUpdateFn(ctx, id)
 	}
-	return result, nil
+	if m.GetByIDFn != nil {
+		return m.GetByIDFn(ctx, id)
+	}
+	return nil, repository.ErrNotFound
 }
-
-func (m *MockWorkflowInstanceRepo) Update(_ context.Context, wi *model.WorkflowInstance) error {
-	if _, ok := m.Instances[wi.ID]; !ok {
-		return repository.ErrNotFound
+func (m *MockWorkflowInstanceRepo) List(ctx context.Context, filter repository.InstanceFilter) ([]*model.WorkflowInstance, int, error) {
+	if m.ListFn != nil {
+		return m.ListFn(ctx, filter)
 	}
-	m.Instances[wi.ID] = wi
+	return nil, 0, nil
+}
+func (m *MockWorkflowInstanceRepo) UpdateState(ctx context.Context, id uuid.UUID, newStateID string) error {
+	if m.UpdateStateFn != nil {
+		return m.UpdateStateFn(ctx, id, newStateID)
+	}
 	return nil
 }
+func (m *MockWorkflowInstanceRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status model.InstanceStatus, completedAt *time.Time) error {
+	if m.UpdateStatusFn != nil {
+		return m.UpdateStatusFn(ctx, id, status, completedAt)
+	}
+	return nil
+}
+func (m *MockWorkflowInstanceRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
+	if m.SoftDeleteFn != nil {
+		return m.SoftDeleteFn(ctx, id)
+	}
+	return nil
+}
+func (m *MockWorkflowInstanceRepo) WithTx(tx repository.DB) repository.WorkflowInstanceRepo { return m }
 
-// MockTaskInstanceRepo implements repository.TaskInstanceRepository for testing
+// MockTaskInstanceRepo is a hand-written mock for TaskInstanceRepo.
 type MockTaskInstanceRepo struct {
-	Instances map[uuid.UUID]*model.TaskInstance
+	BulkCreateFn              func(ctx context.Context, tasks []*model.TaskInstance) error
+	GetByIDFn                 func(ctx context.Context, id uuid.UUID) (*model.TaskInstance, error)
+	ListByInstanceFn          func(ctx context.Context, instanceID uuid.UUID, statusFilter []model.TaskStatus) ([]*model.TaskInstance, error)
+	ListByInstanceAndStateFn  func(ctx context.Context, instanceID uuid.UUID, stateID string) ([]*model.TaskInstance, error)
+	UpdateStatusFn            func(ctx context.Context, id uuid.UUID, status model.TaskStatus, completedAt *time.Time) error
+	UpdateOutcomeFn           func(ctx context.Context, id uuid.UUID, outcome string, data []byte) error
+	SoftDeleteFn              func(ctx context.Context, id uuid.UUID) error
 }
 
-func NewMockTaskInstanceRepo() *MockTaskInstanceRepo {
-	return &MockTaskInstanceRepo{Instances: make(map[uuid.UUID]*model.TaskInstance)}
-}
-
-func (m *MockTaskInstanceRepo) Create(_ context.Context, ti *model.TaskInstance) error {
-	m.Instances[ti.ID] = ti
+func (m *MockTaskInstanceRepo) BulkCreate(ctx context.Context, tasks []*model.TaskInstance) error {
+	if m.BulkCreateFn != nil {
+		return m.BulkCreateFn(ctx, tasks)
+	}
 	return nil
 }
-
-func (m *MockTaskInstanceRepo) GetByID(_ context.Context, id uuid.UUID) (*model.TaskInstance, error) {
-	ti, ok := m.Instances[id]
-	if !ok {
-		return nil, repository.ErrNotFound
+func (m *MockTaskInstanceRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.TaskInstance, error) {
+	if m.GetByIDFn != nil {
+		return m.GetByIDFn(ctx, id)
 	}
-	return ti, nil
+	return nil, repository.ErrNotFound
 }
-
-func (m *MockTaskInstanceRepo) ListByWorkflowInstanceID(_ context.Context, wiID uuid.UUID) ([]*model.TaskInstance, error) {
-	var result []*model.TaskInstance
-	for _, ti := range m.Instances {
-		if ti.WorkflowInstanceID == wiID {
-			result = append(result, ti)
-		}
+func (m *MockTaskInstanceRepo) ListByInstance(ctx context.Context, instanceID uuid.UUID, statusFilter []model.TaskStatus) ([]*model.TaskInstance, error) {
+	if m.ListByInstanceFn != nil {
+		return m.ListByInstanceFn(ctx, instanceID, statusFilter)
 	}
-	return result, nil
+	return nil, nil
 }
-
-func (m *MockTaskInstanceRepo) Update(_ context.Context, ti *model.TaskInstance) error {
-	if _, ok := m.Instances[ti.ID]; !ok {
-		return repository.ErrNotFound
+func (m *MockTaskInstanceRepo) ListByInstanceAndState(ctx context.Context, instanceID uuid.UUID, stateID string) ([]*model.TaskInstance, error) {
+	if m.ListByInstanceAndStateFn != nil {
+		return m.ListByInstanceAndStateFn(ctx, instanceID, stateID)
 	}
-	m.Instances[ti.ID] = ti
+	return nil, nil
+}
+func (m *MockTaskInstanceRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status model.TaskStatus, completedAt *time.Time) error {
+	if m.UpdateStatusFn != nil {
+		return m.UpdateStatusFn(ctx, id, status, completedAt)
+	}
 	return nil
 }
+func (m *MockTaskInstanceRepo) UpdateOutcome(ctx context.Context, id uuid.UUID, outcome string, data []byte) error {
+	if m.UpdateOutcomeFn != nil {
+		return m.UpdateOutcomeFn(ctx, id, outcome, data)
+	}
+	return nil
+}
+func (m *MockTaskInstanceRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
+	if m.SoftDeleteFn != nil {
+		return m.SoftDeleteFn(ctx, id)
+	}
+	return nil
+}
+func (m *MockTaskInstanceRepo) WithTx(tx repository.DB) repository.TaskInstanceRepo { return m }
 
-// MockStateTransitionRepo implements repository.StateTransitionRepository for testing
+// MockStateTransitionRepo is a hand-written mock for StateTransitionRepo.
 type MockStateTransitionRepo struct {
-	Transitions []*model.StateTransition
+	AppendFn          func(ctx context.Context, t *model.StateTransition) error
+	ListByInstanceFn  func(ctx context.Context, instanceID uuid.UUID) ([]*model.StateTransition, error)
 }
 
-func NewMockStateTransitionRepo() *MockStateTransitionRepo {
-	return &MockStateTransitionRepo{}
-}
-
-func (m *MockStateTransitionRepo) Create(_ context.Context, st *model.StateTransition) error {
-	m.Transitions = append(m.Transitions, st)
+func (m *MockStateTransitionRepo) Append(ctx context.Context, t *model.StateTransition) error {
+	if m.AppendFn != nil {
+		return m.AppendFn(ctx, t)
+	}
 	return nil
 }
-
-func (m *MockStateTransitionRepo) ListByWorkflowInstanceID(_ context.Context, wiID uuid.UUID) ([]*model.StateTransition, error) {
-	var result []*model.StateTransition
-	for _, st := range m.Transitions {
-		if st.WorkflowInstanceID == wiID {
-			result = append(result, st)
-		}
+func (m *MockStateTransitionRepo) ListByInstance(ctx context.Context, instanceID uuid.UUID) ([]*model.StateTransition, error) {
+	if m.ListByInstanceFn != nil {
+		return m.ListByInstanceFn(ctx, instanceID)
 	}
-	return result, nil
-}
-
-// MockEngine implements engine.Engine for testing
-type MockEngine struct {
-	EvaluateCalls int
-}
-
-func (m *MockEngine) Evaluate(_ context.Context, _ uuid.UUID) (*engine.TransitionResult, error) {
-	m.EvaluateCalls++
 	return nil, nil
 }
+func (m *MockStateTransitionRepo) WithTx(tx repository.DB) repository.StateTransitionRepo { return m }
 
-func (m *MockEngine) TriggerTransition(_ context.Context, _ uuid.UUID, _, _, _ string) (*engine.TransitionResult, error) {
+// MockWebhookOutboxRepo is a hand-written mock for WebhookOutboxRepo.
+type MockWebhookOutboxRepo struct {
+	BulkInsertFn       func(ctx context.Context, rows []*model.WebhookOutboxRow) error
+	ListPendingFn      func(ctx context.Context, now time.Time, limit int) ([]*model.WebhookOutboxRow, error)
+	MarkDeliveredFn    func(ctx context.Context, id uuid.UUID) error
+	MarkFailedFn       func(ctx context.Context, id uuid.UUID, lastError string) error
+	IncrementAttemptFn func(ctx context.Context, id uuid.UUID, nextAttemptAt time.Time) error
+}
+
+func (m *MockWebhookOutboxRepo) BulkInsert(ctx context.Context, rows []*model.WebhookOutboxRow) error {
+	if m.BulkInsertFn != nil {
+		return m.BulkInsertFn(ctx, rows)
+	}
+	return nil
+}
+func (m *MockWebhookOutboxRepo) ListPending(ctx context.Context, now time.Time, limit int) ([]*model.WebhookOutboxRow, error) {
+	if m.ListPendingFn != nil {
+		return m.ListPendingFn(ctx, now, limit)
+	}
 	return nil, nil
 }
+func (m *MockWebhookOutboxRepo) MarkDelivered(ctx context.Context, id uuid.UUID) error {
+	if m.MarkDeliveredFn != nil {
+		return m.MarkDeliveredFn(ctx, id)
+	}
+	return nil
+}
+func (m *MockWebhookOutboxRepo) MarkFailed(ctx context.Context, id uuid.UUID, lastError string) error {
+	if m.MarkFailedFn != nil {
+		return m.MarkFailedFn(ctx, id, lastError)
+	}
+	return nil
+}
+func (m *MockWebhookOutboxRepo) IncrementAttempt(ctx context.Context, id uuid.UUID, nextAttemptAt time.Time) error {
+	if m.IncrementAttemptFn != nil {
+		return m.IncrementAttemptFn(ctx, id, nextAttemptAt)
+	}
+	return nil
+}
+func (m *MockWebhookOutboxRepo) WithTx(tx repository.DB) repository.WebhookOutboxRepo { return m }

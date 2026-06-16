@@ -1,86 +1,69 @@
 package api
 
 import (
-	"log/slog"
+	"database/sql"
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"workflow-engine/backend/internal/api/handler"
-	"workflow-engine/backend/internal/api/middleware"
-	"workflow-engine/backend/internal/service"
+	"github.com/sirupsen/logrus"
+	"github.com/workflow-engine/backend/internal/api/handler"
+	"github.com/workflow-engine/backend/internal/api/middleware"
+	"github.com/workflow-engine/backend/internal/service"
 )
 
-// NewRouter creates an http.Handler with all API routes and middleware.
-// CORS wraps the router externally so OPTIONS preflight requests are handled
-// before gorilla/mux route matching.
 func NewRouter(
-	processSvc *service.ProcessService,
-	workflowSvc *service.WorkflowService,
+	db *sql.DB,
+	defSvc *service.WorkflowDefService,
+	instSvc *service.InstanceService,
 	taskSvc *service.TaskService,
-	processInstanceSvc *service.ProcessInstanceService,
-	workflowInstanceSvc *service.WorkflowInstanceService,
-	taskInstanceSvc *service.TaskInstanceService,
-	logger *slog.Logger,
+	log *logrus.Logger,
+	corsOrigins string,
 ) http.Handler {
 	r := mux.NewRouter()
 
-	r.Use(middleware.Recovery(logger))
-	r.Use(middleware.Logging(logger))
+	defHandler := handler.NewWorkflowDefHandler(defSvc)
+	instHandler := handler.NewInstanceHandler(instSvc)
+	taskHandler := handler.NewTaskHandler(taskSvc)
+	healthHandler := handler.NewHealthHandler(db)
 
-	// Health check
-	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
-	}).Methods("GET")
+	api := r.PathPrefix("/api/v1").Subrouter()
 
-	v1 := r.PathPrefix("/api/v1").Subrouter()
+	// Workflow defs
+	api.HandleFunc("/workflow-defs", defHandler.List).Methods(http.MethodGet)
+	api.HandleFunc("/workflow-defs/{id}", defHandler.Get).Methods(http.MethodGet)
 
-	// Process definitions
-	ph := handler.NewProcessHandler(processSvc, logger)
-	v1.HandleFunc("/processes", ph.Create).Methods("POST")
-	v1.HandleFunc("/processes", ph.List).Methods("GET")
-	v1.HandleFunc("/processes/{id}", ph.GetByID).Methods("GET")
-	v1.HandleFunc("/processes/{id}", ph.Update).Methods("PUT")
-	v1.HandleFunc("/processes/{id}", ph.Delete).Methods("DELETE")
+	// Admin
+	api.HandleFunc("/admin/reload-defs", defHandler.ReloadDefs).Methods(http.MethodPost)
 
-	// Workflow definitions
-	wh := handler.NewWorkflowHandler(workflowSvc, logger)
-	v1.HandleFunc("/processes/{id}/workflows", wh.Create).Methods("POST")
-	v1.HandleFunc("/processes/{id}/workflows", wh.ListByProcessID).Methods("GET")
-	v1.HandleFunc("/workflows/{id}", wh.GetByID).Methods("GET")
-	v1.HandleFunc("/workflows/{id}", wh.Update).Methods("PUT")
-	v1.HandleFunc("/workflows/{id}", wh.Delete).Methods("DELETE")
+	// Instances
+	api.HandleFunc("/workflow-instances", instHandler.Start).Methods(http.MethodPost)
+	api.HandleFunc("/workflow-instances", instHandler.List).Methods(http.MethodGet)
+	api.HandleFunc("/workflow-instances/{id}", instHandler.Get).Methods(http.MethodGet)
+	api.HandleFunc("/workflow-instances/{id}/cancel", instHandler.Cancel).Methods(http.MethodPost)
+	api.HandleFunc("/workflow-instances/{id}", instHandler.SoftDelete).Methods(http.MethodDelete)
+	api.HandleFunc("/workflow-instances/{id}/tasks", instHandler.ListTasks).Methods(http.MethodGet)
+	api.HandleFunc("/workflow-instances/{id}/history", instHandler.GetHistory).Methods(http.MethodGet)
 
-	// Task definitions
-	th := handler.NewTaskHandler(taskSvc, logger)
-	v1.HandleFunc("/workflows/{id}/tasks", th.Create).Methods("POST")
-	v1.HandleFunc("/workflows/{id}/tasks", th.ListByWorkflowID).Methods("GET")
-	v1.HandleFunc("/tasks/{id}", th.GetByID).Methods("GET")
-	v1.HandleFunc("/tasks/{id}", th.Update).Methods("PUT")
-	v1.HandleFunc("/tasks/{id}", th.Delete).Methods("DELETE")
+	// Tasks
+	api.HandleFunc("/task-instances/{id}", taskHandler.Get).Methods(http.MethodGet)
+	api.HandleFunc("/task-instances/{id}/start", taskHandler.StartTask).Methods(http.MethodPost)
+	api.HandleFunc("/task-instances/{id}/complete", taskHandler.Complete).Methods(http.MethodPost)
+	api.HandleFunc("/task-types", taskHandler.ListTaskTypes).Methods(http.MethodGet)
 
-	// Process instances
-	pih := handler.NewProcessInstanceHandler(processInstanceSvc, logger)
-	v1.HandleFunc("/process-instances", pih.Start).Methods("POST")
-	v1.HandleFunc("/process-instances", pih.List).Methods("GET")
-	v1.HandleFunc("/process-instances/{id}", pih.GetByID).Methods("GET")
-	v1.HandleFunc("/process-instances/{id}/cancel", pih.Cancel).Methods("POST")
-	v1.HandleFunc("/process-instances/{id}/children", pih.ListChildren).Methods("GET")
+	// Health
+	r.HandleFunc("/healthz", healthHandler.Liveness).Methods(http.MethodGet)
+	r.HandleFunc("/readyz", healthHandler.Readiness).Methods(http.MethodGet)
 
-	// Workflow instances
-	wih := handler.NewWorkflowInstanceHandler(workflowInstanceSvc, logger)
-	v1.HandleFunc("/process-instances/{id}/workflows", wih.ListByProcessInstanceID).Methods("GET")
-	v1.HandleFunc("/workflow-instances/{id}", wih.GetByID).Methods("GET")
-	v1.HandleFunc("/workflow-instances/{id}/transition", wih.TriggerTransition).Methods("POST")
-	v1.HandleFunc("/workflow-instances/{id}/transitions", wih.ListTransitions).Methods("GET")
+	// SPA fallback
+	RegisterStatic(r)
 
-	// Task instances
-	tih := handler.NewTaskInstanceHandler(taskInstanceSvc, logger)
-	v1.HandleFunc("/workflow-instances/{id}/tasks", tih.ListByWorkflowInstanceID).Methods("GET")
-	v1.HandleFunc("/task-instances/{id}", tih.GetByID).Methods("GET")
-	v1.HandleFunc("/task-instances/{id}/status", tih.UpdateStatus).Methods("PUT")
-	v1.HandleFunc("/task-instances/{id}/assign", tih.Assign).Methods("PUT")
-
-	return middleware.CORS(r)
+	// Middleware chain
+	chain := middleware.RequestID(
+		middleware.Logging(log)(
+			middleware.Recovery(log)(
+				middleware.CORS(corsOrigins)(r),
+			),
+		),
+	)
+	return chain
 }

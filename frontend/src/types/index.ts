@@ -1,161 +1,84 @@
-export interface Process {
-  id: string;
-  name: string;
-  description: string;
-  version: number;
-  status: string;
-  created_at: string;
-  updated_at: string;
+export interface WorkflowDef {
+  id: string
+  name: string
+  version: number
+  description: string
+  definition: WorkflowDefinition
+  created_at: string
+  deleted_at?: string
 }
 
-export interface Workflow {
-  id: string;
-  process_id: string;
-  name: string;
-  description: string;
-  state_machine: StateMachine;
-  sort_order: number;
-  created_at: string;
-  updated_at: string;
+export interface WorkflowDefinition {
+  name: string
+  version: number
+  description?: string
+  start_state: string
+  end_state: string
+  states: StateDef[]
+  transitions: TransitionDef[]
 }
 
-export interface Task {
-  id: string;
-  workflow_id: string;
-  name: string;
-  description: string;
-  task_type: string;
-  created_at: string;
-  updated_at: string;
+export interface StateDef {
+  id: string
+  label: string
+  tasks: TaskDef[]
 }
 
-export interface StateMachine {
-  states: State[];
-  transitions: Transition[];
-  initial_state: string;
-  terminal_states: string[];
+export interface TaskDef {
+  key: string
+  label: string
+  type: string
 }
 
-export interface State {
-  name: string;
-  description: string;
-  metadata?: Record<string, string>;
-}
-
-export interface Transition {
-  name: string;
-  from_state: string;
-  to_state: string;
-  completion_rule?: CompletionRule;
-}
-
-export interface CompletionRule {
-  type: string;
-  task_refs: string[];
-  n?: number;
-}
-
-export interface CreateProcessInput {
-  name: string;
-  description: string;
-}
-
-export interface UpdateProcessInput {
-  name?: string;
-  description?: string;
-  status?: string;
-}
-
-export interface CreateWorkflowInput {
-  name: string;
-  description: string;
-  state_machine: StateMachine;
-}
-
-export interface UpdateWorkflowInput {
-  name?: string;
-  description?: string;
-  state_machine?: StateMachine;
-}
-
-export interface CreateTaskInput {
-  name: string;
-  description: string;
-  task_type: string;
-}
-
-export interface UpdateTaskInput {
-  name?: string;
-  description?: string;
-  task_type?: string;
-}
-
-// --- Instance types ---
-
-export interface ProcessInstance {
-  id: string;
-  process_id: string;
-  parent_id: string | null;
-  status: string;
-  started_at: string;
-  completed_at: string | null;
-  created_at: string;
-  updated_at: string;
+export interface TransitionDef {
+  from_state: string
+  to_state: string
+  trigger?: { task_key: string }
 }
 
 export interface WorkflowInstance {
-  id: string;
-  workflow_id: string;
-  process_instance_id: string;
-  current_state: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
+  id: string
+  workflow_def_id: string
+  current_state_id: string
+  status: 'active' | 'completed' | 'cancelled'
+  created_by: string
+  context: Record<string, unknown>
+  started_at: string
+  completed_at?: string
+  tasks?: TaskInstance[]
+  history?: StateTransition[]
 }
 
 export interface TaskInstance {
-  id: string;
-  task_id: string;
-  workflow_instance_id: string;
-  status: string;
-  assigned_to: string;
-  completed_at: string | null;
-  created_at: string;
-  updated_at: string;
+  id: string
+  workflow_instance_id: string
+  state_id: string
+  task_key: string
+  task_label: string
+  task_type: string
+  status: 'new' | 'in_progress' | 'done' | 'rejected' | 'cancelled'
+  outcome?: string
+  created_by: string
+  created_at: string
+  completed_at?: string
 }
 
 export interface StateTransition {
-  id: string;
-  workflow_instance_id: string;
-  from_state: string;
-  to_state: string;
-  transition_name: string;
-  triggered_by: string;
-  trigger_type: string;
-  created_at: string;
+  id: string
+  from_state: string
+  to_state: string
+  transitioned_at: string
 }
 
-export interface StartProcessInput {
-  process_id: string;
-  parent_id?: string;
-}
-
-export interface UpdateTaskStatusInput {
-  status: string;
-  triggered_by?: string;
-  trigger_type?: string;
-}
-
-export interface AssignTaskInput {
-  assigned_to: string;
-}
-
-export interface TriggerTransitionInput {
-  transition_name: string;
-  triggered_by: string;
-  trigger_type: string;
+export interface PaginatedResponse<T> {
+  items: T[]
+  total: number
+  limit: number
+  offset: number
 }
 
 export interface ApiError {
-  error: string;
+  code: string
+  message: string
+  details?: unknown
 }

@@ -1,6 +1,4 @@
-//go:build integration
-
-package integration
+package integration_test
 
 import (
 	"context"
@@ -8,165 +6,140 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"workflow-engine/backend/internal/model"
-	"workflow-engine/backend/internal/repository"
-	"workflow-engine/backend/internal/repository/postgres"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/workflow-engine/backend/internal/model"
+	"github.com/workflow-engine/backend/internal/repository"
 )
 
-func createTestWorkflow(t *testing.T) (*model.Process, *model.Workflow) {
-	t.Helper()
-	p := createTestProcess(t)
-	repo := postgres.NewWorkflowRepo(testDB)
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	w := &model.Workflow{
-		ID:           uuid.New(),
-		ProcessID:    p.ID,
-		Name:         "Test Workflow",
-		StateMachine: testStateMachine(),
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := repo.Create(context.Background(), w); err != nil {
-		t.Fatalf("failed to create test workflow: %v", err)
-	}
-	return p, w
-}
-
-func TestTaskRepo_Create_And_GetByID(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-	repo := postgres.NewTaskRepo(testDB)
-	ctx := context.Background()
-
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	tk := &model.Task{
-		ID:         uuid.New(),
-		WorkflowID: w.ID,
-		Name:       "Code Review",
-		TaskType:   "manual",
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}
-
-	if err := repo.Create(ctx, tk); err != nil {
-		t.Fatalf("Create failed: %v", err)
-	}
-
-	got, err := repo.GetByID(ctx, tk.ID)
-	if err != nil {
-		t.Fatalf("GetByID failed: %v", err)
-	}
-	if got.Name != tk.Name {
-		t.Errorf("Name = %q, want %q", got.Name, tk.Name)
-	}
-	if got.TaskType != "manual" {
-		t.Errorf("TaskType = %q, want %q", got.TaskType, "manual")
+func makeTask(instanceID uuid.UUID, stateID, key string) *model.TaskInstance {
+	return &model.TaskInstance{
+		ID:                 uuid.New(),
+		WorkflowInstanceID: instanceID,
+		StateID:            stateID,
+		TaskKey:            key,
+		TaskLabel:          "Test Task",
+		TaskType:           "manual",
+		Status:             model.TaskStatusNew,
+		CreatedBy:          "test",
+		CreatedAt:          time.Now().UTC(),
 	}
 }
 
-func TestTaskRepo_Create_ForeignKeyViolation(t *testing.T) {
-	cleanupTables(t)
-	repo := postgres.NewTaskRepo(testDB)
+func TestTaskInstanceRepo_BulkCreateAndList(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
 	ctx := context.Background()
+	repo := repository.NewTaskInstanceRepo(testDB)
 
-	tk := &model.Task{
-		ID:         uuid.New(),
-		WorkflowID: uuid.New(),
-		Name:       "Orphan",
-		TaskType:   "manual",
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+	tasks := []*model.TaskInstance{
+		makeTask(inst.ID, "submitted", "review"),
+		makeTask(inst.ID, "submitted", "approve"),
 	}
+	require.NoError(t, repo.BulkCreate(ctx, tasks))
 
-	err := repo.Create(ctx, tk)
-	if err != repository.ErrForeignKey {
-		t.Fatalf("expected ErrForeignKey, got %v", err)
-	}
+	got, err := repo.ListByInstance(ctx, inst.ID, nil)
+	require.NoError(t, err)
+	assert.Len(t, got, 2)
 }
 
-func TestTaskRepo_ListByWorkflowID(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-	repo := postgres.NewTaskRepo(testDB)
+func TestTaskInstanceRepo_GetByID(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
 	ctx := context.Background()
+	repo := repository.NewTaskInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	for i := 0; i < 3; i++ {
-		tk := &model.Task{
-			ID:         uuid.New(),
-			WorkflowID: w.ID,
-			Name:       "Task",
-			TaskType:   "manual",
-			CreatedAt:  now.Add(time.Duration(i) * time.Second),
-			UpdatedAt:  now,
-		}
-		repo.Create(ctx, tk)
-	}
+	task := makeTask(inst.ID, "submitted", "review")
+	require.NoError(t, repo.BulkCreate(ctx, []*model.TaskInstance{task}))
 
-	results, err := repo.ListByWorkflowID(ctx, w.ID)
-	if err != nil {
-		t.Fatalf("ListByWorkflowID failed: %v", err)
-	}
-	if len(results) != 3 {
-		t.Fatalf("expected 3, got %d", len(results))
-	}
+	got, err := repo.GetByID(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, task.ID, got.ID)
+	assert.Equal(t, model.TaskStatusNew, got.Status)
 }
 
-func TestTaskRepo_Update(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-	repo := postgres.NewTaskRepo(testDB)
+func TestTaskInstanceRepo_GetByID_NotFound(t *testing.T) {
+	truncateTables(t)
 	ctx := context.Background()
+	repo := repository.NewTaskInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	tk := &model.Task{
-		ID:         uuid.New(),
-		WorkflowID: w.ID,
-		Name:       "Original",
-		TaskType:   "manual",
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}
-	repo.Create(ctx, tk)
-
-	tk.Name = "Updated"
-	tk.TaskType = "approval"
-	tk.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	if err := repo.Update(ctx, tk); err != nil {
-		t.Fatalf("Update failed: %v", err)
-	}
-
-	got, _ := repo.GetByID(ctx, tk.ID)
-	if got.Name != "Updated" {
-		t.Errorf("Name = %q, want %q", got.Name, "Updated")
-	}
-	if got.TaskType != "approval" {
-		t.Errorf("TaskType = %q, want %q", got.TaskType, "approval")
-	}
+	_, err := repo.GetByID(ctx, uuid.New())
+	assert.ErrorIs(t, err, repository.ErrNotFound)
 }
 
-func TestTaskRepo_Delete(t *testing.T) {
-	cleanupTables(t)
-	_, w := createTestWorkflow(t)
-	repo := postgres.NewTaskRepo(testDB)
+func TestTaskInstanceRepo_UpdateStatus(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
 	ctx := context.Background()
+	repo := repository.NewTaskInstanceRepo(testDB)
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	tk := &model.Task{
-		ID:         uuid.New(),
-		WorkflowID: w.ID,
-		Name:       "To Delete",
-		TaskType:   "manual",
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}
-	repo.Create(ctx, tk)
+	task := makeTask(inst.ID, "submitted", "review")
+	require.NoError(t, repo.BulkCreate(ctx, []*model.TaskInstance{task}))
 
-	if err := repo.Delete(ctx, tk.ID); err != nil {
-		t.Fatalf("Delete failed: %v", err)
+	now := time.Now().UTC()
+	require.NoError(t, repo.UpdateStatus(ctx, task.ID, model.TaskStatusDone, &now))
+
+	got, err := repo.GetByID(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.TaskStatusDone, got.Status)
+	require.NotNil(t, got.CompletedAt)
+}
+
+func TestTaskInstanceRepo_ListByInstanceAndState(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
+	ctx := context.Background()
+	repo := repository.NewTaskInstanceRepo(testDB)
+
+	tasks := []*model.TaskInstance{
+		makeTask(inst.ID, "submitted", "review"),
+		makeTask(inst.ID, "approved", "finalize"),
 	}
-	_, err := repo.GetByID(ctx, tk.ID)
-	if err != repository.ErrNotFound {
-		t.Fatalf("expected ErrNotFound, got %v", err)
-	}
+	require.NoError(t, repo.BulkCreate(ctx, tasks))
+
+	got, err := repo.ListByInstanceAndState(ctx, inst.ID, "submitted")
+	require.NoError(t, err)
+	assert.Len(t, got, 1)
+	assert.Equal(t, "review", got[0].TaskKey)
+}
+
+func TestTaskInstanceRepo_ListByInstance_StatusFilter(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
+	ctx := context.Background()
+	repo := repository.NewTaskInstanceRepo(testDB)
+
+	task := makeTask(inst.ID, "submitted", "review")
+	require.NoError(t, repo.BulkCreate(ctx, []*model.TaskInstance{task}))
+
+	now := time.Now().UTC()
+	require.NoError(t, repo.UpdateStatus(ctx, task.ID, model.TaskStatusDone, &now))
+
+	got, err := repo.ListByInstance(ctx, inst.ID, []model.TaskStatus{model.TaskStatusNew})
+	require.NoError(t, err)
+	assert.Len(t, got, 0)
+
+	got, err = repo.ListByInstance(ctx, inst.ID, []model.TaskStatus{model.TaskStatusDone})
+	require.NoError(t, err)
+	assert.Len(t, got, 1)
+}
+
+func TestTaskInstanceRepo_SoftDelete(t *testing.T) {
+	truncateTables(t)
+	_, inst := setupDefAndInstance(t)
+
+	ctx := context.Background()
+	repo := repository.NewTaskInstanceRepo(testDB)
+
+	task := makeTask(inst.ID, "submitted", "review")
+	require.NoError(t, repo.BulkCreate(ctx, []*model.TaskInstance{task}))
+	require.NoError(t, repo.SoftDelete(ctx, task.ID))
+
+	_, err := repo.GetByID(ctx, task.ID)
+	assert.ErrorIs(t, err, repository.ErrNotFound)
 }

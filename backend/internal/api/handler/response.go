@@ -2,44 +2,33 @@ package handler
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
-	"strings"
-
-	"workflow-engine/backend/internal/repository"
 )
 
-// WriteJSON writes data as JSON with the given HTTP status code.
-func WriteJSON(w http.ResponseWriter, status int, data any) {
+type ErrorResponse struct {
+	Error ErrorBody `json:"error"`
+}
+
+type ErrorBody struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Details any    `json:"details,omitempty"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	json.NewEncoder(w).Encode(v)
 }
 
-// WriteError writes an error response as JSON.
-func WriteError(w http.ResponseWriter, status int, msg string) {
-	WriteJSON(w, status, map[string]string{"error": msg})
+func writeError(w http.ResponseWriter, status int, code, message string, details any) {
+	writeJSON(w, status, ErrorResponse{Error: ErrorBody{Code: code, Message: message, Details: details}})
 }
 
-// MapServiceError converts a service/repository error into an HTTP status + message.
-func MapServiceError(err error) (int, string) {
-	if errors.Is(err, repository.ErrNotFound) {
-		return http.StatusNotFound, "resource not found"
-	}
+func writeNotFound(w http.ResponseWriter) {
+	writeError(w, http.StatusNotFound, "NOT_FOUND", "resource not found", nil)
+}
 
-	msg := err.Error()
-
-	if strings.HasPrefix(msg, "validation:") {
-		return http.StatusBadRequest, msg
-	}
-
-	// Business rule violations
-	if strings.HasPrefix(msg, "cannot ") ||
-		strings.HasPrefix(msg, "can only ") ||
-		strings.HasPrefix(msg, "invalid status transition") ||
-		strings.HasPrefix(msg, "completion rule not satisfied") {
-		return http.StatusConflict, msg
-	}
-
-	return http.StatusInternalServerError, "internal server error"
+func writeInternalError(w http.ResponseWriter) {
+	writeError(w, http.StatusInternalServerError, "INTERNAL", "internal server error", nil)
 }

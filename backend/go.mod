@@ -1,10 +1,18 @@
-module workflow-engine/backend
+module github.com/workflow-engine/backend
 
-go 1.26.1
+go 1.22
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/lib/pq v1.12.3
+	github.com/lib/pq v1.10.9
+	github.com/stretchr/testify v1.10.0
 )
 
-require github.com/gorilla/mux v1.8.1 // indirect
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/sirupsen/logrus v1.9.4 // indirect
+	golang.org/x/sys v0.13.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)

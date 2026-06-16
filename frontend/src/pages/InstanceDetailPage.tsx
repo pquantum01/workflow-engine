@@ -1,395 +1,218 @@
-import { useEffect, useState, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import Accordion from '@mui/material/Accordion';
-import AccordionSummary from '@mui/material/AccordionSummary';
-import AccordionDetails from '@mui/material/AccordionDetails';
-import Alert from '@mui/material/Alert';
-import Box from '@mui/material/Box';
-import Button from '@mui/material/Button';
-import Chip from '@mui/material/Chip';
-import Dialog from '@mui/material/Dialog';
-import DialogActions from '@mui/material/DialogActions';
-import DialogContent from '@mui/material/DialogContent';
-import DialogTitle from '@mui/material/DialogTitle';
-import Divider from '@mui/material/Divider';
-import FormControl from '@mui/material/FormControl';
-import IconButton from '@mui/material/IconButton';
-import InputLabel from '@mui/material/InputLabel';
-import MenuItem from '@mui/material/MenuItem';
-import Popover from '@mui/material/Popover';
-import Select from '@mui/material/Select';
-import Table from '@mui/material/Table';
-import TableBody from '@mui/material/TableBody';
-import TableCell from '@mui/material/TableCell';
-import TableHead from '@mui/material/TableHead';
-import TableRow from '@mui/material/TableRow';
-import TextField from '@mui/material/TextField';
-import Typography from '@mui/material/Typography';
-import ArrowBackIcon from '@mui/icons-material/ArrowBack';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import type {
-  Process, ProcessInstance, Workflow, WorkflowInstance,
-  Task, TaskInstance, StateTransition,
-} from '../types';
-import { getProcess } from '../api/processes';
-import { getProcessInstance, cancelProcessInstance } from '../api/processInstances';
-import { listWorkflowInstances } from '../api/workflowInstances';
-import { triggerTransition } from '../api/workflowInstances';
-import { listTaskInstances, updateTaskStatus, assignTask } from '../api/taskInstances';
-import { listStateTransitions } from '../api/stateTransitions';
-import { getWorkflow } from '../api/workflows';
-import { listTasks } from '../api/tasks';
+import { useState } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { ArrowLeft, AlertTriangle } from 'lucide-react'
+import { useInstance, useCancelInstance, useCompleteTask } from '../hooks/useInstances'
+import { useWorkflowDef } from '../hooks/useWorkflowDefs'
+import { Badge } from '../components/ui/Badge'
+import { Skeleton } from '../components/ui/Skeleton'
+import { rendererFor } from '../components/tasks/registry'
+import { getCompletedBy } from '../lib/session'
+import type { TaskInstance, TransitionDef } from '../types'
 
-const instanceStatusColor: Record<string, 'info' | 'success' | 'warning' | 'error'> = {
-  running: 'info',
-  completed: 'success',
-  cancelled: 'warning',
-  failed: 'error',
-};
+export function InstanceDetailPage() {
+  const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
+  const { data: inst, isLoading } = useInstance(id!)
+  const { data: def } = useWorkflowDef(inst?.workflow_def_id ?? '')
+  const cancelMutation = useCancelInstance()
+  const completeMutation = useCompleteTask()
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
 
-const workflowStatusColor: Record<string, 'info' | 'success' | 'warning'> = {
-  active: 'info',
-  completed: 'success',
-  cancelled: 'warning',
-};
-
-const taskStatusColor: Record<string, 'default' | 'info' | 'success' | 'error' | 'warning'> = {
-  pending: 'default',
-  in_progress: 'info',
-  completed: 'success',
-  failed: 'error',
-  skipped: 'warning',
-};
-
-interface WorkflowSection {
-  workflowInstance: WorkflowInstance;
-  workflow: Workflow;
-  taskInstances: TaskInstance[];
-  taskDefs: Task[];
-  transitions: StateTransition[];
-}
-
-export default function InstanceDetailPage() {
-  const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  const [process, setProcess] = useState<Process | null>(null);
-  const [instance, setInstance] = useState<ProcessInstance | null>(null);
-  const [sections, setSections] = useState<WorkflowSection[]>([]);
-  const [error, setError] = useState('');
-
-  // Assign dialog state
-  const [assignAnchor, setAssignAnchor] = useState<HTMLElement | null>(null);
-  const [assignTaskId, setAssignTaskId] = useState('');
-  const [assignValue, setAssignValue] = useState('');
-
-  // Transition dialog state
-  const [transDialogOpen, setTransDialogOpen] = useState(false);
-  const [transWiId, setTransWiId] = useState('');
-  const [transName, setTransName] = useState('');
-  const [transTriggeredBy, setTransTriggeredBy] = useState('');
-  const [transTriggerType, setTransTriggerType] = useState('human');
-
-  const load = useCallback(async () => {
-    if (!id) return;
-    try {
-      const inst = await getProcessInstance(id);
-      setInstance(inst);
-      const proc = await getProcess(inst.process_id);
-      setProcess(proc);
-
-      const wis = await listWorkflowInstances(id) ?? [];
-      const sects: WorkflowSection[] = [];
-      for (const wi of wis) {
-        const [wf, tis, trans] = await Promise.all([
-          getWorkflow(wi.workflow_id),
-          listTaskInstances(wi.id),
-          listStateTransitions(wi.id),
-        ]);
-        const taskDefs = await listTasks(wf.id) ?? [];
-        sects.push({
-          workflowInstance: wi,
-          workflow: wf,
-          taskInstances: tis ?? [],
-          taskDefs,
-          transitions: trans ?? [],
-        });
-      }
-      setSections(sects);
-    } catch (err: any) {
-      setError(err.message);
-    }
-  }, [id]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const handleCancel = async () => {
-    if (!id) return;
-    try {
-      await cancelProcessInstance(id);
-      load();
-    } catch (err: any) {
-      setError(err.message);
-    }
-  };
-
-  const handleTaskAction = async (taskInstanceId: string, status: string) => {
-    try {
-      await updateTaskStatus(taskInstanceId, { status });
-      load();
-    } catch (err: any) {
-      setError(err.message);
-    }
-  };
-
-  const handleAssign = async () => {
-    if (!assignTaskId || !assignValue.trim()) return;
-    try {
-      await assignTask(assignTaskId, { assigned_to: assignValue.trim() });
-      setAssignAnchor(null);
-      setAssignTaskId('');
-      setAssignValue('');
-      load();
-    } catch (err: any) {
-      setError(err.message);
-    }
-  };
-
-  const openTransitionDialog = (wiId: string, transitionName: string) => {
-    setTransWiId(wiId);
-    setTransName(transitionName);
-    setTransTriggeredBy('');
-    setTransTriggerType('human');
-    setTransDialogOpen(true);
-  };
-
-  const handleTriggerTransition = async () => {
-    if (!transWiId || !transName || !transTriggeredBy.trim()) return;
-    try {
-      await triggerTransition(transWiId, {
-        transition_name: transName,
-        triggered_by: transTriggeredBy.trim(),
-        trigger_type: transTriggerType,
-      });
-      setTransDialogOpen(false);
-      load();
-    } catch (err: any) {
-      setError(err.message);
-    }
-  };
-
-  if (!instance || !process) {
-    return <Typography>Loading...</Typography>;
+  if (isLoading || !inst) {
+    return (
+      <div className="p-6 space-y-4">
+        <Skeleton className="h-8 w-64" />
+        <Skeleton className="h-48 w-full" />
+      </div>
+    )
   }
 
+  const tasks = inst.tasks ?? []
+  const history = inst.history ?? []
+
+  const openTasks = tasks.filter((t) => t.status === 'new' || t.status === 'in_progress')
+  const doneTasks = tasks.filter((t) => t.status === 'done')
+  const cancelledTasks = tasks.filter((t) => t.status === 'cancelled' || t.status === 'rejected')
+
+  const handleComplete = (task: TaskInstance, status: 'done' | 'rejected', nextState?: string) => {
+    completeMutation.mutate({
+      taskId: task.id,
+      status,
+      nextState,
+      completedBy: getCompletedBy() || 'user',
+    })
+  }
+
+  const handleCancel = async () => {
+    await cancelMutation.mutateAsync(inst.id)
+    setShowCancelConfirm(false)
+  }
+
+  const hasContext = inst.context && Object.keys(inst.context).length > 0
+
   return (
-    <Box>
+    <div className="p-6 max-w-4xl">
       {/* Header */}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
-        <IconButton onClick={() => navigate('/instances')}><ArrowBackIcon /></IconButton>
-        <Typography variant="h5">{process.name}</Typography>
-        <Chip label={instance.status} size="small" color={instanceStatusColor[instance.status] || 'default'} />
-        <Typography variant="body2" color="text.secondary">
-          Started {new Date(instance.started_at).toLocaleString()}
-        </Typography>
-        <Box sx={{ flexGrow: 1 }} />
-        {instance.status === 'running' && (
-          <Button variant="outlined" color="warning" onClick={handleCancel}>Cancel</Button>
-        )}
-      </Box>
-
-      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
-
-      {sections.length === 0 && (
-        <Typography color="text.secondary">No workflow instances.</Typography>
-      )}
-
-      {sections.map((sect) => {
-        const { workflowInstance: wi, workflow: wf, taskInstances: tis, taskDefs, transitions } = sect;
-        const taskNameMap: Record<string, string> = {};
-        for (const td of taskDefs) {
-          taskNameMap[td.id] = td.name;
-        }
-
-        // Available transitions from current state
-        const availableTransitions = wf.state_machine.transitions.filter(
-          (t) => t.from_state === wi.current_state
-        );
-
-        return (
-          <Accordion key={wi.id} defaultExpanded>
-            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <Typography sx={{ fontWeight: 500 }}>{wf.name}</Typography>
-                <Chip label={wi.current_state} size="small" variant="outlined" />
-                <Chip label={wi.status} size="small" color={workflowStatusColor[wi.status] || 'default'} />
-              </Box>
-            </AccordionSummary>
-            <AccordionDetails>
-              {/* Task Instances */}
-              <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>Tasks</Typography>
-              {tis.length > 0 ? (
-                <Table size="small" sx={{ mb: 2 }}>
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>Task</TableCell>
-                      <TableCell>Status</TableCell>
-                      <TableCell>Assigned To</TableCell>
-                      <TableCell align="right">Actions</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {tis.map((ti) => (
-                      <TableRow key={ti.id}>
-                        <TableCell>{taskNameMap[ti.task_id] || ti.task_id}</TableCell>
-                        <TableCell>
-                          <Chip label={ti.status} size="small" color={taskStatusColor[ti.status] || 'default'} />
-                        </TableCell>
-                        <TableCell>{ti.assigned_to || '—'}</TableCell>
-                        <TableCell align="right">
-                          <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'flex-end' }}>
-                            {ti.status === 'pending' && (
-                              <Button size="small" variant="outlined" onClick={() => handleTaskAction(ti.id, 'in_progress')}>
-                                Start
-                              </Button>
-                            )}
-                            {ti.status === 'in_progress' && (
-                              <>
-                                <Button size="small" variant="outlined" color="success" onClick={() => handleTaskAction(ti.id, 'completed')}>
-                                  Complete
-                                </Button>
-                                <Button size="small" variant="outlined" color="error" onClick={() => handleTaskAction(ti.id, 'failed')}>
-                                  Fail
-                                </Button>
-                              </>
-                            )}
-                            {!['completed', 'failed', 'skipped'].includes(ti.status) && (
-                              <Button
-                                size="small"
-                                variant="text"
-                                onClick={(e) => {
-                                  setAssignTaskId(ti.id);
-                                  setAssignValue(ti.assigned_to || '');
-                                  setAssignAnchor(e.currentTarget);
-                                }}
-                              >
-                                Assign
-                              </Button>
-                            )}
-                          </Box>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>No task instances.</Typography>
-              )}
-
-              {/* Manual Transitions */}
-              {availableTransitions.length > 0 && wi.status === 'active' && (
+      <div className="flex items-start justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <button onClick={() => navigate('/workflow-instances')} className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500">
+            <ArrowLeft size={16} />
+          </button>
+          <div>
+            <div className="flex items-center gap-2">
+              <code className="text-sm font-mono text-zinc-600 dark:text-zinc-400">{inst.id.slice(0, 8)}…</code>
+              <Badge variant={inst.status}>{inst.status}</Badge>
+            </div>
+            <div className="text-xs text-zinc-500 mt-0.5 space-x-2">
+              <span>
+                {def?.name ? `${def.name} v${def.version}` : inst.workflow_def_id.slice(0, 8)}
+              </span>
+              <span>·</span>
+              <span>Started by <strong className="font-medium text-zinc-700 dark:text-zinc-300">{inst.created_by}</strong></span>
+              <span>·</span>
+              <span>{new Date(inst.started_at).toLocaleString()}</span>
+              {inst.completed_at && (
                 <>
-                  <Divider sx={{ my: 2 }} />
-                  <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>Transitions</Typography>
-                  <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
-                    {availableTransitions.map((t) => (
-                      <Button
-                        key={t.name}
-                        variant="outlined"
-                        size="small"
-                        onClick={() => openTransitionDialog(wi.id, t.name)}
-                      >
-                        {t.name} &rarr; {t.to_state}
-                      </Button>
-                    ))}
-                  </Box>
+                  <span>·</span>
+                  <span>Completed {new Date(inst.completed_at).toLocaleString()}</span>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+        {inst.status === 'active' && (
+          <button
+            onClick={() => setShowCancelConfirm(true)}
+            className="px-3 py-1.5 text-sm font-medium rounded-lg border border-red-300 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+          >
+            Cancel Instance
+          </button>
+        )}
+      </div>
 
-              {/* Audit Log */}
-              <Divider sx={{ my: 2 }} />
-              <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>Audit Log</Typography>
-              {transitions.length > 0 ? (
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell>From</TableCell>
-                      <TableCell>To</TableCell>
-                      <TableCell>Transition</TableCell>
-                      <TableCell>Triggered By</TableCell>
-                      <TableCell>Type</TableCell>
-                      <TableCell>Time</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {[...transitions].reverse().map((st) => (
-                      <TableRow key={st.id}>
-                        <TableCell>{st.from_state}</TableCell>
-                        <TableCell>{st.to_state}</TableCell>
-                        <TableCell>{st.transition_name}</TableCell>
-                        <TableCell>{st.triggered_by || '—'}</TableCell>
-                        <TableCell>{st.trigger_type}</TableCell>
-                        <TableCell>{new Date(st.created_at).toLocaleString()}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <Typography variant="body2" color="text.secondary">No transitions recorded yet.</Typography>
-              )}
-            </AccordionDetails>
-          </Accordion>
-        );
-      })}
+      {/* Cancel confirm */}
+      {showCancelConfirm && (
+        <div className="mb-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg flex items-start gap-3">
+          <AlertTriangle size={18} className="text-red-500 mt-0.5 shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-red-800 dark:text-red-300">Cancel this instance?</p>
+            <p className="text-xs text-red-600 dark:text-red-400 mt-0.5">All open tasks will be cancelled. This cannot be undone.</p>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={handleCancel} disabled={cancelMutation.isPending} className="px-3 py-1 text-sm font-medium rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
+              {cancelMutation.isPending ? 'Cancelling…' : 'Confirm'}
+            </button>
+            <button onClick={() => setShowCancelConfirm(false)} className="px-3 py-1 text-sm rounded-lg border border-zinc-300 dark:border-zinc-700 hover:bg-zinc-50 dark:hover:bg-zinc-800">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
-      {/* Assign Popover */}
-      <Popover
-        open={Boolean(assignAnchor)}
-        anchorEl={assignAnchor}
-        onClose={() => setAssignAnchor(null)}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+      {/* Instance Context */}
+      {hasContext && (
+        <div className="mb-4 border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+          <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">Instance Context</h3>
+          <pre className="text-xs font-mono text-zinc-600 dark:text-zinc-400 bg-zinc-50 dark:bg-zinc-800/50 rounded p-3 overflow-auto">
+            {JSON.stringify(inst.context, null, 2)}
+          </pre>
+        </div>
+      )}
+
+      {/* Tasks */}
+      <div className="space-y-3">
+        {openTasks.length > 0 && (
+          <TaskSection title="Open Tasks">
+            {openTasks.map((task) => {
+              const Renderer = rendererFor(task.task_type)
+              const outgoing: TransitionDef[] = def?.definition?.transitions?.filter(
+                (t) => t.from_state === task.state_id
+              ) ?? []
+              return (
+                <Renderer
+                  key={task.id}
+                  task={task}
+                  instance={inst}
+                  outgoingTransitions={outgoing}
+                  onComplete={(status, nextState) => handleComplete(task, status, nextState)}
+                  isLoading={completeMutation.isPending}
+                />
+              )
+            })}
+          </TaskSection>
+        )}
+
+        {doneTasks.length > 0 && (
+          <CollapsibleSection title={`Completed (${doneTasks.length})`}>
+            {doneTasks.map((task) => (
+              <SimpleTaskRow key={task.id} task={task} />
+            ))}
+          </CollapsibleSection>
+        )}
+
+        {cancelledTasks.length > 0 && (
+          <CollapsibleSection title={`Cancelled/Rejected (${cancelledTasks.length})`}>
+            {cancelledTasks.map((task) => (
+              <SimpleTaskRow key={task.id} task={task} />
+            ))}
+          </CollapsibleSection>
+        )}
+
+        {tasks.length === 0 && (
+          <p className="text-sm text-zinc-400 py-4">No tasks for this instance.</p>
+        )}
+      </div>
+
+      {/* History timeline */}
+      {history.length > 0 && (
+        <div className="mt-6 border border-zinc-200 dark:border-zinc-700 rounded-lg p-4">
+          <h3 className="text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-3">History</h3>
+          <div className="space-y-2">
+            {history.map((tr) => (
+              <div key={tr.id} className="flex items-center gap-2 text-sm">
+                <div className="w-2 h-2 rounded-full bg-indigo-400 shrink-0" />
+                <code className="text-xs font-mono text-zinc-600 dark:text-zinc-400">{tr.from_state}</code>
+                <span className="text-zinc-400">→</span>
+                <code className="text-xs font-mono text-zinc-600 dark:text-zinc-400">{tr.to_state}</code>
+                <span className="text-xs text-zinc-400 ml-auto">{new Date(tr.transitioned_at).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TaskSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <h3 className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2">{title}</h3>
+      <div className="space-y-2">{children}</div>
+    </div>
+  )
+}
+
+function CollapsibleSection({ title, children }: { title: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-2 flex items-center gap-1 hover:text-zinc-700 dark:hover:text-zinc-300"
       >
-        <Box sx={{ p: 2, display: 'flex', gap: 1, alignItems: 'center' }}>
-          <TextField
-            size="small"
-            label="Assign to"
-            value={assignValue}
-            onChange={(e) => setAssignValue(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleAssign(); }}
-          />
-          <Button size="small" variant="contained" onClick={handleAssign}>Save</Button>
-        </Box>
-      </Popover>
+        {open ? '▾' : '▸'} {title}
+      </button>
+      {open && <div className="space-y-2">{children}</div>}
+    </div>
+  )
+}
 
-      {/* Transition Dialog */}
-      <Dialog open={transDialogOpen} onClose={() => setTransDialogOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>Trigger: {transName}</DialogTitle>
-        <DialogContent>
-          <TextField
-            fullWidth
-            label="Triggered by"
-            value={transTriggeredBy}
-            onChange={(e) => setTransTriggeredBy(e.target.value)}
-            sx={{ mt: 1, mb: 2 }}
-          />
-          <FormControl fullWidth>
-            <InputLabel>Trigger type</InputLabel>
-            <Select
-              value={transTriggerType}
-              label="Trigger type"
-              onChange={(e) => setTransTriggerType(e.target.value)}
-            >
-              <MenuItem value="human">Human</MenuItem>
-              <MenuItem value="ai_agent">AI Agent</MenuItem>
-            </Select>
-          </FormControl>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setTransDialogOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleTriggerTransition} disabled={!transTriggeredBy.trim()}>
-            Trigger
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
-  );
+function SimpleTaskRow({ task }: { task: TaskInstance }) {
+  return (
+    <div className="flex items-center justify-between py-1.5 px-2 rounded-lg bg-zinc-50 dark:bg-zinc-800/50 text-sm">
+      <span className="text-zinc-700 dark:text-zinc-300">{task.task_label}</span>
+      <Badge variant={task.status}>{task.status}</Badge>
+    </div>
+  )
 }

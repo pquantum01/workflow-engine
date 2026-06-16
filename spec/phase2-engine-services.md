@@ -1,231 +1,259 @@
-# Phase 2: Core Engine + Services — Spec
+# Phase 2 — Engine + Services
 
-## Scope
-State machine engine, completion rule evaluation, service layer for definitions and instances, parent-child enforcement.
+## Goal
+Implement workflow loader, service layer, and state machine engine. No HTTP. All business logic lives here.
 
 ---
 
-## 1. State Machine Engine
+## Package Layout
 
-### Responsibilities
-- Evaluate whether a transition is valid from the current state of a workflow instance.
-- Check completion rules (are required tasks done?) before allowing guarded transitions.
-- Apply transitions atomically (update workflow instance state + log the transition).
-- Auto-evaluate: after a task completes, check if any transitions are now unblocked.
+```
+internal/
+  engine/
+    engine.go
+    engine_test.go
+  service/
+    workflow_def.go
+    instance.go
+    task.go
+    *_test.go
+  workflowloader/
+    loader.go
+    loader_test.go
+  testutil/
+    mocks.go          hand-written repo mocks
+```
 
-### Interface
+---
+
+## Workflow Loader (`internal/workflowloader/loader.go`)
+
 ```go
-type Engine interface {
-    // Evaluate checks all transitions from the current state.
-    // If any transition's completion rule is satisfied, applies it and returns the result.
-    // If multiple transitions are valid, applies the first one found (deterministic by definition order).
-    // Returns nil result if no transitions are available.
-    Evaluate(ctx context.Context, workflowInstanceID uuid.UUID) (*TransitionResult, error)
-
-    // TriggerTransition attempts a specific named transition.
-    // Fails if: transition doesn't exist, wrong current state, or completion rule not satisfied.
-    TriggerTransition(ctx context.Context, workflowInstanceID uuid.UUID, transitionName string) (*TransitionResult, error)
+type LoadResult struct {
+    Loaded   []LoadedDef
+    Warnings []DefWarning
+    Errors   []DefError
 }
 
-type TransitionResult struct {
+type Loader struct {
+    dir     string
+    defRepo repository.WorkflowDefRepo
+    log     *slog.Logger
+}
+
+func (l *Loader) Load(ctx context.Context) (LoadResult, error)
+```
+
+**Algorithm:**
+1. `os.ReadDir(l.dir)` — collect `*.json` files; skip non-JSON
+2. For each file: unmarshal into `model.WorkflowDefinition`
+3. Call `def.Validate()` — collect hard errors + warnings
+4. Hard error → add to `result.Errors`, continue to next file
+5. `repo.GetByNameVersion(name, version)`:
+   - Not found → `Create`
+   - Found, identical JSONB → skip (no-op, log info)
+   - Found, different content → add to errors (version conflict)
+6. Return `LoadResult`
+
+**On startup** (`main.go`): `loader.Load(ctx)` runs. If any hard errors → `slog.Error` each + **`os.Exit(1)`** (fail boot — per Q8 decision). Warnings: `slog.Warn` each + continue.
+
+**On `POST /admin/reload-defs`**: same `loader.Load(ctx)`, return result as JSON. Does NOT exit on error.
+
+### Loader Tests
+- Valid file loads successfully
+- Invalid JSON → error
+- Unknown task type → error
+- Cycle detected → error
+- Unreachable state → error
+- Same `(name, version)` identical content → no-op
+- Same `(name, version)` different content → error
+- Warning cases: W1, W3
+- Mixed good + bad files → good ones load, bad ones in errors
+
+---
+
+## Engine (`internal/engine/engine.go`)
+
+```go
+type TransitionMode int
+
+const (
+    ModeLinear    TransitionMode = iota
+    ModeTaskBound
+    ModeUserPicks
+)
+
+type Event struct {
+    Type               string   // event type constants
     WorkflowInstanceID uuid.UUID
-    FromState          string
-    ToState            string
-    TransitionName     string
-    IsTerminal         bool   // true if ToState is a terminal state
+    Data               map[string]any
 }
+
+// Event type constants
+const (
+    EventTaskCreated          = "task.created"
+    EventTaskCompleted        = "task.completed"
+    EventTaskCancelled        = "task.cancelled"
+    EventStateTransitioned    = "state.transitioned"
+    EventInstanceStarted      = "instance.started"
+    EventInstanceCompleted    = "instance.completed"
+    EventInstanceCancelled    = "instance.cancelled"
+)
+
+type Engine struct {
+    defRepo      repository.WorkflowDefRepo
+    instanceRepo repository.WorkflowInstanceRepo
+    taskRepo     repository.TaskInstanceRepo
+    transRepo    repository.StateTransitionRepo
+    pool         *pgxpool.Pool
+    log          *slog.Logger
+}
+
+func (e *Engine) Start(ctx context.Context, defID uuid.UUID, createdBy string) (*model.WorkflowInstance, []Event, error)
+
+func (e *Engine) Complete(ctx context.Context, taskID uuid.UUID, status model.TaskStatus, nextState string, createdBy string) (*model.WorkflowInstance, []Event, error)
+
+func (e *Engine) Cancel(ctx context.Context, instanceID uuid.UUID) (*model.WorkflowInstance, []Event, error)
 ```
 
-### Completion Rule Evaluation
-Given a completion rule and a list of task instances for the workflow instance:
+**`Start` flow:**
+1. Load def from repo
+2. Open tx
+3. Create `workflow_instance` (status=active, current_state=start_state)
+4. Spawn task_instances for start_state tasks
+5. Commit
+6. Return instance + `[EventInstanceStarted, ...EventTaskCreated per task]`
 
-| Rule Type | Logic |
-|-----------|-------|
-| `single`  | The single referenced task must have status `completed` |
-| `all_of`  | All referenced tasks must have status `completed` |
-| `any_of`  | At least one referenced task must have status `completed` |
-| `n_of_m`  | At least N of the referenced tasks must have status `completed` |
+**`Complete` flow (see Architecture.md engine semantics):**
+1. Open tx
+2. `GetByIDForUpdate` on instance (row lock)
+3. Validate instance active, task completable
+4. Handle rejected → cancel instance
+5. Handle done → derive mode → fire transition or wait
+6. Commit
+7. Return updated instance + events
 
-**Task matching**: CompletionRule.TaskRefs contains task definition **names**. The engine looks up task instances by matching their task_definition.name against these refs.
+**`Cancel` flow:**
+1. Open tx
+2. `GetByIDForUpdate` on instance
+3. Validate instance active
+4. Set instance status=cancelled, completed_at=now
+5. Cancel all open tasks (status=cancelled)
+6. Commit
+7. Return instance + `[EventInstanceCancelled, ...EventTaskCancelled per cancelled task]`
 
-**No completion rule**: If a transition has no completion rule (nil), it can be triggered freely via `TriggerTransition` (manual/unguarded transition).
-
-### Edge Cases
-- Workflow instance in terminal state: no transitions allowed, return error.
-- Workflow instance status is not `active`: no transitions allowed.
-- Transition from wrong state: return error with current state info.
-- Task ref in completion rule doesn't match any task definition: return error during evaluation.
+### Engine Tests (`engine_test.go`)
+Use mock repos from `testutil/mocks.go`. Test:
+- Linear: single task done → transition fires
+- Linear: two tasks, first done = wait, second done = transition
+- Task-bound: complete bound task → correct edge, sibling cancelled
+- Task-bound: two edges, different task keys each fire correct edge
+- User-picks: no `next_state` → error
+- User-picks: invalid `next_state` → error
+- User-picks: valid `next_state` → transition fires
+- Rejected task → instance cancelled, all open tasks cancelled
+- Completing task on cancelled instance → `ErrInstanceTerminal`
+- Completing already-done task → `ErrConflict`
+- Reaching end_state → instance completed
+- Start: tasks spawned, instance in start state
+- Cancel: all open tasks cancelled
 
 ---
 
-## 2. Definition Services
+## Service Layer (`internal/service/`)
 
-### ProcessService
+Services are thin. They:
+- Validate inputs
+- Call engine or repo
+- Translate repo sentinel errors to service errors
+
 ```go
-type ProcessService interface {
-    Create(ctx context.Context, input CreateProcessInput) (*model.Process, error)
-    GetByID(ctx context.Context, id uuid.UUID) (*model.Process, error)
-    List(ctx context.Context, offset, limit int) ([]*model.Process, error)
-    Update(ctx context.Context, id uuid.UUID, input UpdateProcessInput) (*model.Process, error)
-    Delete(ctx context.Context, id uuid.UUID) error
+// workflow_def.go
+type WorkflowDefService struct {
+    repo   repository.WorkflowDefRepo
+    loader *workflowloader.Loader
+    log    *slog.Logger
 }
 
-type CreateProcessInput struct {
-    Name        string
-    Description string
+func (s *WorkflowDefService) List(ctx, includeDeleted bool) ([]*model.WorkflowDef, error)
+func (s *WorkflowDefService) GetByID(ctx, id uuid.UUID) (*model.WorkflowDef, error)
+func (s *WorkflowDefService) Reload(ctx) (workflowloader.LoadResult, error)
+func (s *WorkflowDefService) SoftDelete(ctx, id uuid.UUID) error  // blocks if active instances exist
+
+// instance.go
+type InstanceService struct {
+    engine       *engine.Engine
+    instanceRepo repository.WorkflowInstanceRepo
+    taskRepo     repository.TaskInstanceRepo
+    transRepo    repository.StateTransitionRepo
+    log          *slog.Logger
 }
 
-type UpdateProcessInput struct {
-    Name        *string  // nil = don't change
-    Description *string
-    Status      *string
+func (s *InstanceService) Start(ctx, defID uuid.UUID, createdBy string) (*model.WorkflowInstance, []engine.Event, error)
+func (s *InstanceService) GetByID(ctx, id uuid.UUID) (*model.WorkflowInstance, error)
+func (s *InstanceService) List(ctx, filter repository.InstanceFilter) ([]*model.WorkflowInstance, int, error)
+func (s *InstanceService) Cancel(ctx, id uuid.UUID) (*model.WorkflowInstance, []engine.Event, error)
+func (s *InstanceService) SoftDelete(ctx, id uuid.UUID) error
+
+// task.go
+type TaskService struct {
+    engine   *engine.Engine
+    taskRepo repository.TaskInstanceRepo
+    log      *slog.Logger
 }
+
+func (s *TaskService) GetByID(ctx, id uuid.UUID) (*model.TaskInstance, error)
+func (s *TaskService) ListByInstance(ctx, instanceID uuid.UUID, statusFilter []model.TaskStatus) ([]*model.TaskInstance, error)
+func (s *TaskService) Start(ctx, id uuid.UUID) (*model.TaskInstance, error)     // in_progress
+func (s *TaskService) Complete(ctx, id uuid.UUID, status model.TaskStatus, nextState string, createdBy string) (*model.WorkflowInstance, []engine.Event, error)
 ```
 
-**Business rules:**
-- Create: auto-assigns UUID, version=1, status="draft", timestamps.
-- Update: validates new status if provided. Cannot update an archived process.
-- Delete: only draft processes can be deleted. Active/archived must be archived first.
+### Service Tests
+Mock repos via `testutil/mocks.go`. Cover:
+- Def list (active only, include deleted)
+- Def get (not found)
+- Reload delegates to loader
+- Instance start (delegates to engine)
+- Instance list with filters
+- Instance cancel (delegates to engine)
+- Task start (validates in_progress only from new/in_progress)
+- Task complete (delegates to engine)
+- All service errors translate correctly
 
-### WorkflowService
+---
+
+## Testutil Mocks (`internal/testutil/mocks.go`)
+
+Hand-written mock for each repo interface. Each mock records calls and returns configurable responses.
+
 ```go
-type WorkflowService interface {
-    Create(ctx context.Context, processID uuid.UUID, input CreateWorkflowInput) (*model.Workflow, error)
-    GetByID(ctx context.Context, id uuid.UUID) (*model.Workflow, error)
-    ListByProcessID(ctx context.Context, processID uuid.UUID) ([]*model.Workflow, error)
-    Update(ctx context.Context, id uuid.UUID, input UpdateWorkflowInput) (*model.Workflow, error)
-    Delete(ctx context.Context, id uuid.UUID) error
+type MockWorkflowDefRepo struct {
+    CreateFn           func(ctx, def) error
+    GetByIDFn          func(ctx, id) (*model.WorkflowDef, error)
+    GetByNameVersionFn func(ctx, name, version) (*model.WorkflowDef, error)
+    ListFn             func(ctx, includeDeleted) ([]*model.WorkflowDef, error)
+    SoftDeleteFn       func(ctx, id) error
+    // WithTx returns self by default
 }
-
-type CreateWorkflowInput struct {
-    Name         string
-    Description  string
-    StateMachine model.StateMachine
-    SortOrder    int
-}
-
-type UpdateWorkflowInput struct {
-    Name         *string
-    Description  *string
-    StateMachine *model.StateMachine
-    SortOrder    *int
-}
-```
-
-**Business rules:**
-- Create: validates state machine, verifies process exists and is not archived.
-- Update: validates new state machine if provided.
-- Delete: only if parent process is in draft status.
-
-### TaskService
-```go
-type TaskService interface {
-    Create(ctx context.Context, workflowID uuid.UUID, input CreateTaskInput) (*model.Task, error)
-    GetByID(ctx context.Context, id uuid.UUID) (*model.Task, error)
-    ListByWorkflowID(ctx context.Context, workflowID uuid.UUID) ([]*model.Task, error)
-    Update(ctx context.Context, id uuid.UUID, input UpdateTaskInput) (*model.Task, error)
-    Delete(ctx context.Context, id uuid.UUID) error
-}
-
-type CreateTaskInput struct {
-    Name        string
-    Description string
-    TaskType    string
-}
-
-type UpdateTaskInput struct {
-    Name        *string
-    Description *string
-    TaskType    *string
-}
+// ... similarly for all repo interfaces
 ```
 
 ---
 
-## 3. Instance Services
+## Sentinel Errors (service layer)
 
-### ProcessInstanceService
 ```go
-type ProcessInstanceService interface {
-    // Start creates a new process instance from a process definition.
-    // Also creates workflow instances and task instances for all workflows/tasks in the definition.
-    Start(ctx context.Context, input StartProcessInput) (*model.ProcessInstance, error)
-
-    GetByID(ctx context.Context, id uuid.UUID) (*model.ProcessInstance, error)
-    List(ctx context.Context, offset, limit int) ([]*model.ProcessInstance, error)
-    ListChildren(ctx context.Context, parentID uuid.UUID) ([]*model.ProcessInstance, error)
-    Cancel(ctx context.Context, id uuid.UUID) error
-}
-
-type StartProcessInput struct {
-    ProcessID uuid.UUID
-    ParentID  *uuid.UUID  // optional, for child processes
-}
+var ErrInstanceTerminal = errors.New("instance is in terminal state")
+var ErrTaskNotCompletable = errors.New("task is not in a completable state")
+var ErrInvalidNextState = errors.New("next_state is not a valid outgoing transition")
+var ErrDefHasActiveInstances = errors.New("workflow def has active instances")
 ```
-
-**Business rules:**
-- Start: process definition must be `active`. If ParentID is set, the parent must exist and must NOT itself have a parent (1-level enforcement).
-- Start: creates all workflow instances (initial state from state machine) and task instances (status=pending).
-- Cancel: sets status to `cancelled`, also cancels all active workflow instances.
-
-### WorkflowInstanceService
-```go
-type WorkflowInstanceService interface {
-    GetByID(ctx context.Context, id uuid.UUID) (*model.WorkflowInstance, error)
-    ListByProcessInstanceID(ctx context.Context, processInstanceID uuid.UUID) ([]*model.WorkflowInstance, error)
-    TriggerTransition(ctx context.Context, id uuid.UUID, input TriggerTransitionInput) (*TransitionResult, error)
-}
-
-type TriggerTransitionInput struct {
-    TransitionName string
-    TriggeredBy    string
-    TriggerType    string  // human, ai_agent, rule, process
-}
-```
-
-### TaskInstanceService
-```go
-type TaskInstanceService interface {
-    GetByID(ctx context.Context, id uuid.UUID) (*model.TaskInstance, error)
-    ListByWorkflowInstanceID(ctx context.Context, workflowInstanceID uuid.UUID) ([]*model.TaskInstance, error)
-    UpdateStatus(ctx context.Context, id uuid.UUID, input UpdateTaskStatusInput) (*model.TaskInstance, error)
-    Assign(ctx context.Context, id uuid.UUID, assignedTo string) (*model.TaskInstance, error)
-}
-
-type UpdateTaskStatusInput struct {
-    Status      string  // completed, failed, skipped
-    TriggeredBy string
-    TriggerType string
-}
-```
-
-**Business rules:**
-- UpdateStatus: after marking a task as `completed`, auto-evaluate the parent workflow instance's engine to check if any transitions are now unblocked.
-- Cannot update status of a task whose workflow instance is not `active`.
-- Status transitions: pending -> in_progress -> completed/failed/skipped. Cannot go backwards.
 
 ---
 
-## 4. Test Plan
-
-### Engine Unit Tests
-- Evaluate with no available transitions -> nil result.
-- Evaluate with unguarded transition -> applies it.
-- Evaluate with `single` rule satisfied -> applies.
-- Evaluate with `single` rule not satisfied -> nil.
-- Evaluate with `all_of` rule, all done -> applies.
-- Evaluate with `all_of` rule, partial -> nil.
-- Evaluate with `any_of` rule, one done -> applies.
-- Evaluate with `n_of_m` rule, exactly N done -> applies.
-- Evaluate with `n_of_m` rule, less than N -> nil.
-- TriggerTransition for nonexistent transition -> error.
-- TriggerTransition from wrong state -> error.
-- TriggerTransition on terminal state -> error.
-- TriggerTransition on non-active workflow -> error.
-
-### Service Unit Tests (mocked repos)
-- ProcessService: create sets defaults, update validates status, delete only draft.
-- WorkflowService: create validates state machine + process exists, delete only if process is draft.
-- TaskService: create validates type, update validates type.
-- ProcessInstanceService: start creates all instances, parent-child 1-level enforcement, cancel cascades.
-- TaskInstanceService: complete triggers engine evaluation, invalid status transitions rejected.
+## Exit Criteria
+- [ ] `make test` green (all engine + service + loader unit tests)
+- [ ] Loader: startup path fails boot on hard errors (manual verify)
+- [ ] Loader: reload path returns errors without exit (test)
+- [ ] Engine covers all 8 transition scenarios
+- [ ] No `fmt.Println`
