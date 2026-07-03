@@ -39,6 +39,11 @@ workflow-engine/
 - `spec/Currentstatus.md` — Phase progress tracker + decisions log
 - `spec/glossary.md` — Domain terms
 - `spec/phase{N}-*.md` — Per-phase detailed specs
+- `spec/plans/` — Implementation plans (per feature)
+
+## File Organization Rules
+- **All documentation goes in `spec/`** — design docs, plans, specs. Never create a `docs/` or `docs/superpowers/` or any other top-level folder for documentation.
+- Read this file at the start of every session before engaging any skills or writing any files.
 
 ## Development Phases
 | # | Phase | Status |
