@@ -135,7 +135,7 @@ workflow-engine/
 │   └── src/
 │       ├── main.tsx
 │       ├── App.tsx
-│       ├── api/                        client.ts + per-resource modules
+│       ├── api/                        client.ts + per-resource modules (tasks.ts, comments.ts, attachment.ts)
 │       ├── components/
 │       │   ├── ui/                     shadcn components
 │       │   ├── tasks/                  Task renderer registry + per-type renderers

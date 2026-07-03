@@ -90,6 +90,41 @@ Complete inventory of every test in the repository. No exceptions.
 
 ---
 
+### Frontend Unit — additions (Phase 7)
+
+#### `src/__tests__/task-api.test.ts` (new)
+| Test | What it verifies |
+|------|-----------------|
+| `updateTask sends PATCH with partial body` | `updateTask(id, {priority:'high'})` → `PATCH /task-instances/:id` with correct body |
+| `createAdhocTask sends POST` | `createAdhocTask(instanceId, body)` → `POST /workflow-instances/:id/tasks` |
+| `addComment sends POST` | `addComment(taskId, body)` → `POST /task-instances/:id/comments` |
+| `listComments returns array` | 200 response → typed `TaskComment[]` returned |
+
+#### `src/__tests__/TaskCard.test.tsx` (new or extended)
+| Test | What it verifies |
+|------|-----------------|
+| `renders priority badge` | `priority="high"` → red badge visible |
+| `renders adhoc badge when is_adhoc=true` | "Ad-hoc" badge rendered |
+| `edit fields locked when terminal` | Priority dropdown disabled when `status=done` |
+| `renders expected completion date` | Date shown when `expected_completion_date` set |
+
+#### `src/__tests__/CommentsPanel.test.tsx` (new)
+| Test | What it verifies |
+|------|-----------------|
+| `renders comment list` | Mock comments → author + content visible |
+| `renders empty state` | No comments → empty state message |
+| `add comment form submits` | Fill author + content → `addComment` called |
+| `comment form enabled when task terminal` | Post-completion add still enabled |
+
+#### `src/__tests__/AdhocTaskModal.test.tsx` (new)
+| Test | What it verifies |
+|------|-----------------|
+| `renders state picker from def states` | Dropdown contains def state options |
+| `submits with correct payload` | Fill form → `createAdhocTask` called with correct body |
+| `shows validation error for missing label` | Empty label → error message shown |
+
+---
+
 ## Backend Unit Tests
 
 Run: `go test github.com/workflow-engine/backend/internal/...`  

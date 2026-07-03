@@ -23,7 +23,7 @@ ALTER TABLE task_instance
 
 All new columns are nullable (except `priority` which has a default). Existing rows unaffected.
 
-### Migration 004 — new tables
+### Migration 004 — new task related tables
 
 ```sql
 CREATE TABLE task_comment (
@@ -260,7 +260,103 @@ Comments and attachment content fetched via their own endpoints.
 
 ---
 
-## 6. Out of Scope
+## 6. Frontend Changes
+
+### New API modules (`src/api/`)
+
+```
+tasks.ts       — add updateTask(id, patch), createAdhocTask(instanceId, body)
+comments.ts    — addComment(taskId, body), listComments(taskId)
+attachment.ts  — uploadAttachment(taskId, body), downloadAttachment(taskId), deleteAttachment(taskId)
+```
+
+New types in `src/types/index.ts`:
+```typescript
+interface TaskInstance {
+  // existing fields +
+  priority: 'low' | 'medium' | 'high'
+  expected_completion_date: string | null
+  expected_completion_time: string | null
+  is_adhoc: boolean
+  comment_count: number
+  has_attachment: boolean
+}
+
+interface TaskComment {
+  id: string
+  task_instance_id: string
+  author: string
+  content: string
+  created_at: string
+}
+
+interface TaskAttachmentMeta {
+  id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  uploaded_at: string
+  updated_at: string
+}
+```
+
+### Task detail page / task card changes
+
+**Priority badge** — color-coded chip alongside task label:
+- `low` → grey, `medium` → yellow, `high` → red
+
+**Is-adhoc indicator** — small "Ad-hoc" badge on task card when `is_adhoc=true`
+
+**Expected completion** — show `expected_completion_date` + `expected_completion_time` if set (formatted, not raw ISO)
+
+**Edit panel** (pre-completion only) — inline form with:
+- Priority dropdown (`low` / `medium` / `high`)
+- Date picker for `expected_completion_date`
+- Time picker for `expected_completion_time`
+- Submit calls `PATCH /task-instances/:id`; fields locked (read-only) when task is terminal
+
+### Comments section (on task detail)
+
+Below task metadata, collapsible or always-visible panel:
+- List of comments ordered oldest-first: avatar/initials from `author`, content, relative timestamp
+- "Add comment" textarea + author input + submit button — always enabled (post-completion too)
+- Uses `GET /task-instances/:id/comments` (polled or on-demand)
+- Optimistic add: append locally on submit, rollback on error
+
+### Attachment section (on task detail)
+
+Shown only when `S3_ENABLED=true` (frontend can detect by checking if upload endpoint returns `503`):
+- Current file shown if `has_attachment=true`: filename, size, download button
+- Upload button → base64-encodes selected file client-side → `POST /task-instances/:id/attachment`
+- Replace semantics: uploading new file replaces existing
+- Delete button (with confirm) → `DELETE /task-instances/:id/attachment`
+- Max file size enforced client-side (2MB) before encoding; server also validates
+
+### Ad-hoc task creation
+
+On workflow instance detail page, "Add Task" button (visible only when instance is `active`):
+- Modal form: state picker (dropdown of all def states), label, task type, priority, dates
+- Submit → `POST /api/v1/workflow-instances/:id/tasks`
+- On success: invalidate task list query → new task appears in task panel
+
+### Task list changes
+
+Task list rows gain:
+- Priority badge column
+- Ad-hoc indicator icon
+- Expected completion date (if set)
+
+### TanStack Query integration
+
+| Query key | Endpoint | Stale time |
+|-----------|----------|------------|
+| `['task', id]` | `GET /task-instances/:id` | existing |
+| `['task-comments', id]` | `GET /task-instances/:id/comments` | 30s |
+| `['task-attachment', id]` | metadata only from task response `has_attachment` | — |
+
+---
+
+## 7. Out of Scope
 
 - Multiple attachments per task (one file per task, replace semantics)
 - Comment edit or delete
