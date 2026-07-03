@@ -11,6 +11,7 @@
 | 4 | Frontend Admin | ✅ Complete | React scaffold, workflow def list/detail, state graph viz |
 | 5 | Frontend Ops | ✅ Complete | Start instance, task completion, live graph, admin reload |
 | 6 | Polish & Deploy | ✅ Complete | Dockerfile, docker-compose, graceful shutdown, smoke + e2e |
+| 7 | Task Extensions | ⬜ Pending | Priority/dates, comments, file upload (S3), ad-hoc tasks — see `2026-07-03-task-extensions-design.md` |
 
 ## Exit Criteria Per Phase
 

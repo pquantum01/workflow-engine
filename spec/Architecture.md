@@ -88,14 +88,21 @@ workflow-engine/
 │   │   │   ├── workflow_def.go
 │   │   │   ├── workflow_instance.go
 │   │   │   ├── task_instance.go
+│   │   │   ├── task_comment.go
+│   │   │   ├── task_attachment.go
 │   │   │   ├── state_transition.go
 │   │   │   ├── webhook_outbox.go
 │   │   │   └── helpers.go
 │   │   ├── service/
 │   │   │   ├── workflow_def.go        Load, reload, list, get, delete
 │   │   │   ├── instance.go            Start, get, list, cancel, delete
-│   │   │   ├── task.go                List, get, start, complete
+│   │   │   ├── task.go                List, get, start, complete, update, add-adhoc
+│   │   │   ├── comment.go             Add, list comments
+│   │   │   ├── attachment.go          Upload, download, delete (S3-gated)
 │   │   │   └── *_test.go
+│   │   ├── storage/
+│   │   │   ├── interface.go           FileStore interface (Upload/Download/Delete)
+│   │   │   └── s3.go                  AWS S3 implementation (wired only when S3_ENABLED=true)
 │   │   ├── webhook/
 │   │   │   ├── dispatcher.go          Event → outbox rows (in-tx helper)
 │   │   │   ├── worker.go              Background goroutine, retry logic
@@ -185,23 +192,54 @@ CREATE INDEX ON workflow_instance (status)          WHERE deleted_at IS NULL;
 ### `task_instance`
 ```sql
 CREATE TABLE task_instance (
-  id                    UUID PRIMARY KEY,
-  workflow_instance_id  UUID NOT NULL REFERENCES workflow_instance(id),
-  state_id              TEXT NOT NULL,
-  task_key              TEXT NOT NULL,
-  task_label            TEXT NOT NULL,
-  task_type             TEXT NOT NULL,
-  status                TEXT NOT NULL CHECK (status IN ('new','in_progress','done','rejected','cancelled')),
-  outcome               TEXT,
-  data                  JSONB,
-  created_by            TEXT,
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  completed_at          TIMESTAMPTZ,
-  deleted_at            TIMESTAMPTZ,
+  id                      UUID PRIMARY KEY,
+  workflow_instance_id    UUID NOT NULL REFERENCES workflow_instance(id),
+  state_id                TEXT NOT NULL,
+  task_key                TEXT NOT NULL,
+  task_label              TEXT NOT NULL,
+  task_type               TEXT NOT NULL,
+  status                  TEXT NOT NULL CHECK (status IN ('new','in_progress','done','rejected','cancelled')),
+  outcome                 TEXT,
+  data                    JSONB,
+  created_by              TEXT,
+  priority                TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low','medium','high')),
+  expected_completion_date DATE,
+  expected_completion_time TIME,
+  is_adhoc                BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at            TIMESTAMPTZ,
+  deleted_at              TIMESTAMPTZ,
   UNIQUE (workflow_instance_id, state_id, task_key)
 );
 CREATE INDEX ON task_instance (workflow_instance_id, status) WHERE deleted_at IS NULL;
 ```
+
+### `task_comment`
+```sql
+CREATE TABLE task_comment (
+  id               UUID PRIMARY KEY,
+  task_instance_id UUID NOT NULL REFERENCES task_instance(id),
+  author           TEXT NOT NULL,
+  content          VARCHAR(2048) NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX task_comment_task_idx ON task_comment (task_instance_id, created_at);
+```
+
+### `task_attachment`
+```sql
+CREATE TABLE task_attachment (
+  id               UUID PRIMARY KEY,
+  task_instance_id UUID NOT NULL UNIQUE,
+  filename         TEXT NOT NULL,
+  content_type     TEXT NOT NULL,
+  size_bytes       INT  NOT NULL,
+  s3_url           TEXT NOT NULL,
+  uploaded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+One attachment per task (UNIQUE on `task_instance_id`). Upload replaces existing. `s3_url` is the full internal S3 URL — never exposed to clients.
 
 ### `state_transition` (append-only audit)
 ```sql
@@ -409,10 +447,17 @@ DELETE /workflow-instances/{id}         soft-delete
 
 ### Task Instances
 ```
-GET    /workflow-instances/{id}/tasks   list tasks ?status=
-GET    /task-instances/{id}             get task
-POST   /task-instances/{id}/start       mark in_progress
-POST   /task-instances/{id}/complete    { status, next_state?, completed_by, outcome?, data? }
+GET    /workflow-instances/{id}/tasks           list tasks ?status=
+POST   /workflow-instances/{id}/tasks           create ad-hoc task { state_id, label, task_type, created_by, priority?, expected_completion_date?, expected_completion_time? }
+GET    /task-instances/{id}                     get task (includes priority, dates, is_adhoc, comment_count, has_attachment)
+PATCH  /task-instances/{id}                     partial update { priority?, expected_completion_date?, expected_completion_time? } — locked post-completion
+POST   /task-instances/{id}/start               mark in_progress
+POST   /task-instances/{id}/complete            { status, next_state?, completed_by, outcome?, data? }
+POST   /task-instances/{id}/comments            add comment { author, content } — allowed anytime incl. post-completion
+GET    /task-instances/{id}/comments            list comments ordered by created_at ASC
+POST   /task-instances/{id}/attachment          upload/replace file { filename, content_type, data: base64 } — S3-gated
+GET    /task-instances/{id}/attachment          download file (server-proxied from S3) — S3-gated
+DELETE /task-instances/{id}/attachment          remove file — S3-gated
 ```
 
 ### Misc
@@ -434,7 +479,7 @@ GET    /readyz                           readiness (DB ping)
 }
 ```
 
-Error codes: `VALIDATION_FAILED` `NOT_FOUND` `CONFLICT` `INSTANCE_TERMINAL` `TASK_NOT_COMPLETABLE` `INVALID_NEXT_STATE` `INTERNAL` `BAD_REQUEST`
+Error codes: `VALIDATION_FAILED` `NOT_FOUND` `CONFLICT` `INSTANCE_TERMINAL` `TASK_NOT_COMPLETABLE` `INVALID_NEXT_STATE` `TASK_COMPLETED` `INVALID_STATE` `FEATURE_DISABLED` `FILE_TOO_LARGE` `INTERNAL` `BAD_REQUEST`
 
 HTTP status: `200` `201` `204` `400` `404` `409` `422` `500`
 
@@ -507,6 +552,14 @@ WEBHOOK_CONFIG            /etc/webhook/webhooks.json    (default: ./webhooks.jso
 WEBHOOK_WORKER_INTERVAL   5s                            (default: 5s)
 WEBHOOK_MAX_ATTEMPTS      6                             (default: 6)
 CORS_ALLOWED_ORIGINS      http://localhost:3000,...
+
+# S3 File Upload (feature-flagged)
+S3_ENABLED                false                         (default: false — disables all attachment endpoints)
+S3_BUCKET                                               (required when S3_ENABLED=true)
+S3_REGION                 us-east-1                     (default: us-east-1)
+S3_ACCESS_KEY                                           (required when S3_ENABLED=true)
+S3_SECRET_KEY                                           (required when S3_ENABLED=true)
+S3_ENDPOINT                                             (optional — for MinIO/LocalStack)
 
 # Frontend (build-time)
 VITE_API_BASE_URL         /api   (default; nginx or embedded static serves /api/* to backend)

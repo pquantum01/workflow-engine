@@ -38,10 +38,39 @@
 - FR-27: Client can mark a task `in_progress` via `POST /task-instances/{id}/start` (optional UI affordance).
 - FR-28: Task instances snapshot `task_label` and `task_type` at spawn (immutable; def version changes don't affect in-flight tasks).
 
+### Task Attributes
+- FR-29a: Task instances carry `priority` (`low` | `medium` | `high`), default `medium`.
+- FR-29b: Task instances carry optional `expected_completion_date` (DATE) and `expected_completion_time` (TIME, time-of-day).
+- FR-29c: `priority`, `expected_completion_date`, `expected_completion_time` are editable while task is non-terminal. Locked once terminal.
+- FR-29d: `task_label`, `task_type`, `task_key` are immutable after creation.
+
+### Task Comments
+- FR-29e: Any caller can add a comment to any task at any time (including after completion) via `POST /api/v1/task-instances/{id}/comments`.
+- FR-29f: Comments are immutable — no edit or delete. Author is a free-text string (same pattern as `created_by`).
+- FR-29g: Comment `content` is VARCHAR(2048).
+- FR-29h: Comments are fetched via `GET /api/v1/task-instances/{id}/comments` (not embedded in task response).
+
+### Task Attachments (File Upload)
+- FR-29i: File upload is gated by `S3_ENABLED` env var (default `false`). When disabled, attachment endpoints return `503 FEATURE_DISABLED`.
+- FR-29j: One file per task; uploading a new file replaces the existing one.
+- FR-29k: Upload accepts base64-encoded file in JSON body (`filename`, `content_type`, `data`). Decoded size must be ≤ 2MB.
+- FR-29l: Files stored in S3. Key pattern: `attachments/{task_instance_id}/{filename}`.
+- FR-29m: Download proxied through server (`GET /api/v1/task-instances/{id}/attachment`). S3 URL never exposed to client.
+- FR-29n: Attachment can be deleted via `DELETE /api/v1/task-instances/{id}/attachment`.
+- FR-29o: Upload and delete allowed both pre- and post-completion.
+
+### Ad-hoc Tasks
+- FR-29p: Users can add ad-hoc tasks to any workflow instance via `POST /api/v1/workflow-instances/{id}/tasks`.
+- FR-29q: Ad-hoc task requires `state_id` (must exist in workflow def), `label`, `task_type`, `created_by`. Optional: `priority`, `expected_completion_date`, `expected_completion_time`.
+- FR-29r: Ad-hoc tasks are rejected if the workflow instance is not `active` (returns `409 INSTANCE_TERMINAL`).
+- FR-29s: `task_key` for ad-hoc tasks is auto-generated: slugified label + 4-char hex random suffix (e.g., `review_legal_docs_a3f9`).
+- FR-29t: Ad-hoc tasks marked `is_adhoc = true`. They participate in transition readiness: all non-terminal tasks for `current_state_id` (including ad-hoc) must be terminal before transition fires.
+- FR-29u: Ad-hoc tasks added to past states do not affect transitions (state already moved). Ad-hoc tasks added to future states block transition when the engine reaches that state.
+
 ### Task Types (v1)
-- FR-29: Four built-in task types: `approval`, `form`, `checklist`, `manual`.
-- FR-30: Unknown task types in a def are rejected at load time.
-- FR-31: `GET /api/v1/task-types` returns the canonical list.
+- FR-30: Four built-in task types: `approval`, `form`, `checklist`, `manual`.
+- FR-31: Unknown task types in a def are rejected at load time.
+- FR-32a: `GET /api/v1/task-types` returns the canonical list.
 
 ### Webhooks
 - FR-32: System fires webhooks on events: `task.created`, `task.completed`, `task.cancelled`, `state.transitioned`, `instance.started`, `instance.completed`, `instance.cancelled`.

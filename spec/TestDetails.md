@@ -13,6 +13,81 @@ Complete inventory of every test in the repository. No exceptions.
 | E2E | 5 specs | 5 tests | Playwright + Chromium | `cd tests/e2e && npx playwright test` |
 | **Total** | | **~115** | | |
 
+> **Task extensions (phase 7) will add:** ~15 integration tests, ~6 unit tests. Updated totals after implementation.
+
+---
+
+## New Tests Required — Task Extensions (Phase 7)
+
+### Backend Unit
+
+#### `internal/model/task_instance_test.go` — additions
+| Test | What it verifies |
+|------|-----------------|
+| `TestTaskInstance_Priority_Default` | New `TaskInstance` has `priority = "medium"` by default |
+| `TestTaskInstance_IsAdhoc` | `is_adhoc` flag set correctly on ad-hoc tasks |
+
+#### `internal/service/task_test.go` (new or extended)
+| Test | What it verifies |
+|------|-----------------|
+| `TestTaskService_Update_PreCompletion` | Priority/dates updatable when `new` or `in_progress` |
+| `TestTaskService_Update_PostCompletion_Rejects` | Returns `ErrTaskCompleted` when terminal |
+| `TestTaskService_CreateAdhoc_ValidState` | Ad-hoc task created with slugified key |
+| `TestTaskService_CreateAdhoc_InvalidState` | Returns `ErrInvalidState` when state_id not in def |
+| `TestTaskService_CreateAdhoc_TerminalInstance` | Returns `ErrInstanceTerminal` when instance not active |
+
+#### `internal/service/comment_test.go` (new)
+| Test | What it verifies |
+|------|-----------------|
+| `TestCommentService_Add` | Comment added, returned with author/content/created_at |
+| `TestCommentService_Add_TooLong` | Content > 2048 chars → error |
+| `TestCommentService_List` | Comments returned ordered by `created_at ASC` |
+
+#### `internal/storage/s3_test.go` (new, integration-style with mock S3)
+| Test | What it verifies |
+|------|-----------------|
+| `TestFileStore_Upload` | Returns valid s3_url on upload |
+| `TestFileStore_Download` | Returns reader for uploaded content |
+| `TestFileStore_Delete` | Object removed after delete |
+
+---
+
+### Backend Integration — additions to `tests/integration/`
+
+#### `task_repo_test.go` — additions
+| Test | What it verifies |
+|------|-----------------|
+| `TestTaskInstanceRepo_UpdateFields` | `priority`, `expected_completion_date`, `expected_completion_time` persist |
+| `TestTaskInstanceRepo_ListByInstanceAndState_IncludesAdhoc` | Ad-hoc tasks returned in state query |
+
+#### `task_comment_repo_test.go` (new file)
+| Test | What it verifies |
+|------|-----------------|
+| `TestTaskCommentRepo_Add` | Insert comment, fetch by task |
+| `TestTaskCommentRepo_List_OrderedByTime` | Multiple comments ordered ASC by `created_at` |
+| `TestTaskCommentRepo_List_Empty` | No comments → empty slice |
+
+#### `task_attachment_repo_test.go` (new file)
+| Test | What it verifies |
+|------|-----------------|
+| `TestTaskAttachmentRepo_Upsert_Insert` | First upload creates row |
+| `TestTaskAttachmentRepo_Upsert_Replace` | Second upload replaces `s3_url`, updates `updated_at` |
+| `TestTaskAttachmentRepo_GetByTask_NotFound` | Missing → `ErrNotFound` |
+| `TestTaskAttachmentRepo_Delete` | Row removed after delete |
+
+#### `api_test.go` — additions
+| Test | Method + Path | What it verifies |
+|------|--------------|-----------------|
+| `TestAPI_UpdateTask_Priority` | `PATCH /api/v1/task-instances/:id` | 200, `priority` updated |
+| `TestAPI_UpdateTask_PostCompletion_Rejected` | `PATCH /api/v1/task-instances/:id` | 409 `TASK_COMPLETED` |
+| `TestAPI_CreateAdhocTask` | `POST /api/v1/workflow-instances/:id/tasks` | 201, `is_adhoc=true` |
+| `TestAPI_CreateAdhocTask_InvalidState` | `POST /api/v1/workflow-instances/:id/tasks` | 422 `INVALID_STATE` |
+| `TestAPI_CreateAdhocTask_TerminalInstance` | `POST /api/v1/workflow-instances/:id/tasks` | 409 `INSTANCE_TERMINAL` |
+| `TestAPI_AddComment` | `POST /api/v1/task-instances/:id/comments` | 201, comment returned |
+| `TestAPI_ListComments` | `GET /api/v1/task-instances/:id/comments` | 200, ordered list |
+| `TestAPI_Attachment_FeatureDisabled` | `POST /api/v1/task-instances/:id/attachment` | 503 `FEATURE_DISABLED` |
+| `TestAPI_AdhocTask_BlocksTransition` | Full flow: complete def tasks, verify transition blocked by adhoc task | 200 once ad-hoc task also completed |
+
 ---
 
 ## Backend Unit Tests
