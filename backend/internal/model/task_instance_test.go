@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	"github.com/workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/model"
 )
 
 func TestTaskInstance_IsCompletable(t *testing.T) {

@@ -9,7 +9,7 @@ TEST_DB_URL := postgres://workflow:workflow@localhost:5433/workflow_test?sslmode
 
 build:
 	mkdir -p bin
-	go build -o $(BINARY) ./backend/cmd/server
+	cd backend && go build -o ../bin/server ./cmd/server
 
 run: build
 	DATABASE_URL=$(DB_URL) \
@@ -20,10 +20,10 @@ run: build
 	$(BINARY)
 
 test:
-	go test ./backend/...
+	cd backend && go test ./...
 
 test-integration:
-	DATABASE_URL=$(TEST_DB_URL) go test ./backend/tests/integration/... -v -count=1
+	cd backend && DATABASE_URL=$(TEST_DB_URL) go test ./tests/integration/... -v -count=1
 
 docker-up:
 	docker-compose up -d postgres postgres_test

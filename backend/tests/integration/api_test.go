@@ -12,11 +12,12 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/workflow-engine/backend/internal/api"
-	"github.com/workflow-engine/backend/internal/engine"
-	"github.com/workflow-engine/backend/internal/repository"
-	"github.com/workflow-engine/backend/internal/service"
-	"github.com/workflow-engine/backend/internal/workflowloader"
+	"workflow-engine/backend/internal/api"
+	"workflow-engine/backend/internal/engine"
+	"workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/service"
+	"workflow-engine/backend/internal/storage"
+	"workflow-engine/backend/internal/workflowloader"
 )
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -28,14 +29,20 @@ func newTestServer(t *testing.T) *httptest.Server {
 	instRepo := repository.NewWorkflowInstanceRepo(testDB)
 	taskRepo := repository.NewTaskInstanceRepo(testDB)
 	transRepo := repository.NewStateTransitionRepo(testDB)
+	commentRepo := repository.NewTaskCommentRepo(testDB)
+	attRepo := repository.NewTaskAttachmentRepo(testDB)
 
 	loader := workflowloader.New("../../workflows", defRepo, log)
 	eng := engine.New(testDB, defRepo, instRepo, taskRepo, transRepo, log)
 	defSvc := service.NewWorkflowDefService(defRepo, instRepo, loader, log)
 	instSvc := service.NewInstanceService(eng, instRepo, taskRepo, transRepo, log)
 	taskSvc := service.NewTaskService(eng, taskRepo, log)
+	taskSvc.SetInstRepo(instRepo)
+	taskSvc.SetDefRepo(defRepo)
+	commentSvc := service.NewCommentService(commentRepo, log)
+	attSvc := service.NewAttachmentService(storage.NewNoopStore(), attRepo, log)
 
-	handler := api.NewRouter(testDB, defSvc, instSvc, taskSvc, log, "*")
+	handler := api.NewRouter(testDB, defSvc, instSvc, taskSvc, commentSvc, attSvc, log, "*")
 	return httptest.NewServer(handler)
 }
 

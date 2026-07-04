@@ -6,9 +6,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
-	"github.com/workflow-engine/backend/internal/engine"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/engine"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/repository"
 )
 
 type InstanceService struct {

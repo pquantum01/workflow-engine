@@ -9,9 +9,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/workflow-engine/backend/internal/engine"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/engine"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/repository"
 )
 
 func newEngine() *engine.Engine {
@@ -371,6 +371,72 @@ func TestEngine_StateTransition_Recorded(t *testing.T) {
 	require.Len(t, transitions, 1)
 	assert.Equal(t, "s1", transitions[0].FromState)
 	assert.Equal(t, "s2", transitions[0].ToState)
+}
+
+func TestEngine_AdhocTask_InPastState_NoTransition(t *testing.T) {
+	truncateTables(t)
+	ctx := context.Background()
+
+	// 3-state workflow: s1(T1) → s2(T2) → s3(terminal)
+	// s2 is non-terminal so instance stays active after s1→s2
+	def := &model.WorkflowDef{
+		ID: uuid.New(), Name: "eng-adhoc-paststate", Version: 1,
+		Definition: model.WorkflowDefinition{
+			Name: "eng-adhoc-paststate", Version: 1, StartState: "s1", EndState: "s3",
+			States: []model.StateDef{
+				{ID: "s1", Label: "S1", Tasks: []model.TaskDef{{Key: "t1", Label: "T1", Type: "manual"}}},
+				{ID: "s2", Label: "S2", Tasks: []model.TaskDef{{Key: "t2", Label: "T2", Type: "manual"}}},
+				{ID: "s3", Label: "S3", Tasks: []model.TaskDef{}},
+			},
+			Transitions: []model.TransitionDef{
+				{FromState: "s1", ToState: "s2"},
+				{FromState: "s2", ToState: "s3"},
+			},
+		},
+	}
+	seedDef(t, def)
+
+	eng := newEngine()
+	taskRepo := repository.NewTaskInstanceRepo(testDB)
+
+	// Start instance — T1 created in s1
+	inst, _, err := eng.Start(ctx, def.ID, "user1")
+	require.NoError(t, err)
+	require.Equal(t, "s1", inst.CurrentStateID)
+
+	// Complete T1 → transitions to s2, T2 spawned
+	s1Tasks, _ := taskRepo.ListByInstanceAndState(ctx, inst.ID, "s1")
+	inst, _, err = eng.Complete(ctx, s1Tasks[0].ID, model.TaskStatusDone, "", "user1")
+	require.NoError(t, err)
+	require.Equal(t, "s2", inst.CurrentStateID)
+
+	// Confirm T2 exists in s2
+	s2Tasks, _ := taskRepo.ListByInstanceAndState(ctx, inst.ID, "s2")
+	require.Len(t, s2Tasks, 1)
+
+	// Create adhoc task for past state s1 (instance is now at s2)
+	adhoc := &model.TaskInstance{
+		ID:                 uuid.New(),
+		WorkflowInstanceID: inst.ID,
+		StateID:            "s1",
+		TaskKey:            "adhoc_followup_aa00",
+		TaskLabel:          "Adhoc Follow-up",
+		TaskType:           "manual",
+		Status:             model.TaskStatusNew,
+		CreatedBy:          "user1",
+		Priority:           "medium",
+		IsAdhoc:            true,
+	}
+	require.NoError(t, taskRepo.Create(ctx, adhoc))
+
+	// Complete adhoc — must NOT re-fire s1→s2 transition (would duplicate T2)
+	inst, _, err = eng.Complete(ctx, adhoc.ID, model.TaskStatusDone, "", "user1")
+	require.NoError(t, err)
+	assert.Equal(t, "s2", inst.CurrentStateID) // still at s2
+
+	// T2 must still exist exactly once — no duplicate
+	s2TasksAfter, _ := taskRepo.ListByInstanceAndState(ctx, inst.ID, "s2")
+	assert.Len(t, s2TasksAfter, 1)
 }
 
 func eventsOfType(events []engine.Event, eventType string) []string {

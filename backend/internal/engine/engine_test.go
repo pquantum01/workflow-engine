@@ -7,10 +7,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	"github.com/workflow-engine/backend/internal/engine"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/repository"
-	"github.com/workflow-engine/backend/internal/testutil"
+	"workflow-engine/backend/internal/engine"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/testutil"
 )
 
 // engineFixture builds a fake DB-less engine backed by mock repos for unit tests.

@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/repository"
 )
 
 func makeTask(instanceID uuid.UUID, stateID, key string) *model.TaskInstance {

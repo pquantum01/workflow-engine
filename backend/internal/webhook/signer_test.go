@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/workflow-engine/backend/internal/webhook"
+	"workflow-engine/backend/internal/webhook"
 )
 
 func TestSign_ProducesHMACSHA256(t *testing.T) {

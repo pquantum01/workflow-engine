@@ -7,10 +7,10 @@ import (
 	"strconv"
 
 	"github.com/gorilla/mux"
-	"github.com/workflow-engine/backend/internal/api/dto"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/repository"
-	"github.com/workflow-engine/backend/internal/service"
+	"workflow-engine/backend/internal/api/dto"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/service"
 )
 
 type InstanceHandler struct {

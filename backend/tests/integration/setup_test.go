@@ -37,6 +37,8 @@ func truncateTables(t *testing.T) {
 	_, err := testDB.ExecContext(context.Background(), `
 		TRUNCATE TABLE
 			webhook_outbox,
+			task_attachment,
+			task_comment,
 			state_transition,
 			task_instance,
 			workflow_instance,

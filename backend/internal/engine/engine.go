@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/repository"
 )
 
 const (
@@ -237,6 +237,19 @@ func (e *Engine) Complete(ctx context.Context, taskID uuid.UUID, status model.Ta
 	}
 	events = append(events, Event{Type: EventTaskCompleted, WorkflowInstanceID: inst.ID,
 		Data: map[string]any{"task_id": task.ID.String(), "status": "done"}})
+
+	// Adhoc task (or any task) in a past state: instance already moved on, no transition.
+	if task.StateID != inst.CurrentStateID {
+		if err := tx.Commit(); err != nil {
+			return nil, nil, err
+		}
+		e.log.WithFields(logrus.Fields{
+			"task_id":       taskID,
+			"task_state":    task.StateID,
+			"current_state": inst.CurrentStateID,
+		}).Debug("engine.Complete: task state != current state, skipping transition")
+		return inst, events, nil
+	}
 
 	mode := def.Definition.TransitionMode(task.StateID)
 	nextStateID, cancelEvents, err := e.resolveTransition(ctx, txTaskRepo, def, inst, task, mode, nextState)

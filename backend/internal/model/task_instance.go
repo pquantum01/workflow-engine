@@ -38,6 +38,11 @@ type TaskInstance struct {
 	CreatedAt          time.Time
 	CompletedAt        *time.Time
 	DeletedAt          *time.Time
+	// Phase 7 extensions
+	Priority               string
+	ExpectedCompletionDate *string
+	ExpectedCompletionTime *string
+	IsAdhoc                bool
 }
 
 func (t *TaskInstance) IsCompletable() bool {
@@ -46,4 +51,23 @@ func (t *TaskInstance) IsCompletable() bool {
 
 func (t *TaskInstance) IsTerminal() bool {
 	return t.Status == TaskStatusDone || t.Status == TaskStatusRejected || t.Status == TaskStatusCancelled
+}
+
+type TaskComment struct {
+	ID             uuid.UUID
+	TaskInstanceID uuid.UUID
+	Author         string
+	Content        string
+	CreatedAt      time.Time
+}
+
+type TaskAttachment struct {
+	ID             uuid.UUID
+	TaskInstanceID uuid.UUID
+	Filename       string
+	ContentType    string
+	SizeBytes      int
+	S3URL          string
+	UploadedAt     time.Time
+	UpdatedAt      time.Time
 }

@@ -1,11 +1,15 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, AlertTriangle } from 'lucide-react'
+import { AnimatePresence } from 'framer-motion'
 import { useInstance, useCancelInstance, useCompleteTask } from '../hooks/useInstances'
 import { useWorkflowDef } from '../hooks/useWorkflowDefs'
 import { Badge } from '../components/ui/Badge'
 import { Skeleton } from '../components/ui/Skeleton'
 import { rendererFor } from '../components/tasks/registry'
+import { PriorityBadge } from '../components/tasks/PriorityBadge'
+import { AdhocTaskModal } from '../components/tasks/AdhocTaskModal'
+import { TaskDrawer } from '../components/tasks/TaskDrawer'
 import { getCompletedBy } from '../lib/session'
 import type { TaskInstance, TransitionDef } from '../types'
 
@@ -17,6 +21,8 @@ export function InstanceDetailPage() {
   const cancelMutation = useCancelInstance()
   const completeMutation = useCompleteTask()
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
+  const [showAdhoc, setShowAdhoc] = useState(false)
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
 
   if (isLoading || !inst) {
     return (
@@ -29,6 +35,7 @@ export function InstanceDetailPage() {
 
   const tasks = inst.tasks ?? []
   const history = inst.history ?? []
+  const selectedTask = tasks.find((t) => t.id === selectedTaskId) ?? null
 
   const openTasks = tasks.filter((t) => t.status === 'new' || t.status === 'in_progress')
   const doneTasks = tasks.filter((t) => t.status === 'done')
@@ -121,6 +128,24 @@ export function InstanceDetailPage() {
 
       {/* Tasks */}
       <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-zinc-500 uppercase tracking-wide">Tasks</span>
+          {inst.status === 'active' && (
+            <button
+              onClick={() => setShowAdhoc(true)}
+              className="rounded bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700"
+            >
+              + Add Task
+            </button>
+          )}
+        </div>
+        {showAdhoc && def && (
+          <AdhocTaskModal
+            instanceId={inst.id}
+            states={def.definition.states}
+            onClose={() => setShowAdhoc(false)}
+          />
+        )}
         {openTasks.length > 0 && (
           <TaskSection title="Open Tasks">
             {openTasks.map((task) => {
@@ -136,6 +161,7 @@ export function InstanceDetailPage() {
                   outgoingTransitions={outgoing}
                   onComplete={(status, nextState) => handleComplete(task, status, nextState)}
                   isLoading={completeMutation.isPending}
+                  onDetails={() => setSelectedTaskId(task.id)}
                 />
               )
             })}
@@ -145,7 +171,7 @@ export function InstanceDetailPage() {
         {doneTasks.length > 0 && (
           <CollapsibleSection title={`Completed (${doneTasks.length})`}>
             {doneTasks.map((task) => (
-              <SimpleTaskRow key={task.id} task={task} />
+              <SimpleTaskRow key={task.id} task={task} onClick={() => setSelectedTaskId(task.id)} />
             ))}
           </CollapsibleSection>
         )}
@@ -153,7 +179,7 @@ export function InstanceDetailPage() {
         {cancelledTasks.length > 0 && (
           <CollapsibleSection title={`Cancelled/Rejected (${cancelledTasks.length})`}>
             {cancelledTasks.map((task) => (
-              <SimpleTaskRow key={task.id} task={task} />
+              <SimpleTaskRow key={task.id} task={task} onClick={() => setSelectedTaskId(task.id)} />
             ))}
           </CollapsibleSection>
         )}
@@ -180,6 +206,16 @@ export function InstanceDetailPage() {
           </div>
         </div>
       )}
+
+      {/* Task detail drawer */}
+      <AnimatePresence>
+        {selectedTask && (
+          <TaskDrawer
+            task={selectedTask}
+            onClose={() => setSelectedTaskId(null)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   )
 }
@@ -208,11 +244,25 @@ function CollapsibleSection({ title, children }: { title: string; children: Reac
   )
 }
 
-function SimpleTaskRow({ task }: { task: TaskInstance }) {
+function SimpleTaskRow({ task, onClick }: { task: TaskInstance; onClick?: () => void }) {
   return (
-    <div className="flex items-center justify-between py-1.5 px-2 rounded-lg bg-zinc-50 dark:bg-zinc-800/50 text-sm">
-      <span className="text-zinc-700 dark:text-zinc-300">{task.task_label}</span>
-      <Badge variant={task.status}>{task.status}</Badge>
+    <div
+      className="flex items-center justify-between py-2 px-3 rounded-lg bg-zinc-50 dark:bg-zinc-800/50 text-sm cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors group"
+      onClick={onClick}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="text-zinc-700 dark:text-zinc-300 truncate">{task.task_label}</span>
+        {task.priority && <PriorityBadge priority={task.priority as 'low' | 'medium' | 'high'} />}
+        {task.is_adhoc && (
+          <span className="rounded bg-purple-100 text-purple-600 dark:bg-purple-900 dark:text-purple-300 px-2 py-0.5 text-xs font-medium">
+            Ad-hoc
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-1.5 shrink-0">
+        <Badge variant={task.status}>{task.status.replace('_', ' ')}</Badge>
+        <span className="text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-400 dark:group-hover:text-zinc-500 transition-colors">›</span>
+      </div>
     </div>
   )
 }

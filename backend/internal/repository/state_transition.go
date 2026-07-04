@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/google/uuid"
-	"github.com/workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/model"
 )
 
 type stateTransitionRepo struct {

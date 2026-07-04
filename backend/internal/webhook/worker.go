@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
-	"github.com/workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/repository"
 )
 
 var backoffSchedule = []time.Duration{

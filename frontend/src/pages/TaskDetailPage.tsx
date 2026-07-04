@@ -4,6 +4,9 @@ import { useInstance, useCompleteTask } from '../hooks/useInstances'
 import { useWorkflowDef } from '../hooks/useWorkflowDefs'
 import { tasksApi } from '../api/instances'
 import { rendererFor } from '../components/tasks/registry'
+import { PriorityBadge } from '../components/tasks/PriorityBadge'
+import { CommentsPanel } from '../components/tasks/CommentsPanel'
+import { AttachmentSection } from '../components/tasks/AttachmentSection'
 import { Badge } from '../components/ui/Badge'
 import { Skeleton } from '../components/ui/Skeleton'
 import { getCompletedBy } from '../lib/session'
@@ -43,13 +46,27 @@ export function TaskDetailPage() {
   return (
     <div className="p-6 max-w-lg">
       <div className="mb-4">
-        <h1 className="text-xl font-semibold">{task.task_label}</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-xl font-semibold">{task.task_label}</h1>
+          {task.priority && <PriorityBadge priority={task.priority} />}
+          {task.is_adhoc && (
+            <span className="rounded bg-purple-100 text-purple-600 dark:bg-purple-900 dark:text-purple-300 px-2 py-0.5 text-xs font-medium">
+              Ad-hoc
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-2 mt-1 text-sm text-zinc-500">
           <code className="font-mono text-xs">{task.task_key}</code>
           <span>·</span>
           <span>{task.task_type}</span>
           <Badge variant={task.status}>{task.status}</Badge>
         </div>
+        {task.expected_completion_date && (
+          <p className="text-xs text-zinc-400 mt-0.5">
+            Due: {task.expected_completion_date}
+            {task.expected_completion_time ? ` at ${task.expected_completion_time}` : ''}
+          </p>
+        )}
         {inst && (
           <p className="text-xs text-zinc-400 mt-1">
             Instance: <code className="font-mono">{inst.id.slice(0, 8)}…</code>
@@ -85,6 +102,14 @@ export function TaskDetailPage() {
           {(completeMutation.error as Error)?.message}
         </div>
       )}
+
+      <div className="mt-6 space-y-6 border-t pt-6 dark:border-zinc-700">
+        <CommentsPanel taskId={task.id} />
+        <AttachmentSection
+          taskId={task.id}
+          hasMeta={task.has_attachment ?? false}
+        />
+      </div>
     </div>
   )
 }

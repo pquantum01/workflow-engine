@@ -12,10 +12,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/repository"
-	"github.com/workflow-engine/backend/internal/testutil"
-	"github.com/workflow-engine/backend/internal/workflowloader"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/testutil"
+	"workflow-engine/backend/internal/workflowloader"
 )
 
 var silentLog = func() *logrus.Logger {

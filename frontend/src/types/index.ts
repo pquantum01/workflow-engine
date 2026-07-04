@@ -61,6 +61,29 @@ export interface TaskInstance {
   created_by: string
   created_at: string
   completed_at?: string
+  priority: 'low' | 'medium' | 'high'
+  expected_completion_date: string | null
+  expected_completion_time: string | null
+  is_adhoc: boolean
+  comment_count: number
+  has_attachment: boolean
+}
+
+export interface TaskComment {
+  id: string
+  task_instance_id: string
+  author: string
+  content: string
+  created_at: string
+}
+
+export interface TaskAttachmentMeta {
+  id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  uploaded_at: string
+  updated_at: string
 }
 
 export interface StateTransition {

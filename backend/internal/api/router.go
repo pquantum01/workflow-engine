@@ -6,9 +6,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
-	"github.com/workflow-engine/backend/internal/api/handler"
-	"github.com/workflow-engine/backend/internal/api/middleware"
-	"github.com/workflow-engine/backend/internal/service"
+	"workflow-engine/backend/internal/api/handler"
+	"workflow-engine/backend/internal/api/middleware"
+	"workflow-engine/backend/internal/service"
 )
 
 func NewRouter(
@@ -16,6 +16,8 @@ func NewRouter(
 	defSvc *service.WorkflowDefService,
 	instSvc *service.InstanceService,
 	taskSvc *service.TaskService,
+	commentSvc *service.CommentService,
+	attSvc *service.AttachmentService,
 	log *logrus.Logger,
 	corsOrigins string,
 ) http.Handler {
@@ -24,6 +26,7 @@ func NewRouter(
 	defHandler := handler.NewWorkflowDefHandler(defSvc)
 	instHandler := handler.NewInstanceHandler(instSvc)
 	taskHandler := handler.NewTaskHandler(taskSvc)
+	taskExtHandler := handler.NewTaskExtHandler(taskSvc, commentSvc, attSvc)
 	healthHandler := handler.NewHealthHandler(db)
 
 	api := r.PathPrefix("/api/v1").Subrouter()
@@ -46,8 +49,15 @@ func NewRouter(
 
 	// Tasks
 	api.HandleFunc("/task-instances/{id}", taskHandler.Get).Methods(http.MethodGet)
+	api.HandleFunc("/task-instances/{id}", taskExtHandler.Patch).Methods(http.MethodPatch)
 	api.HandleFunc("/task-instances/{id}/start", taskHandler.StartTask).Methods(http.MethodPost)
 	api.HandleFunc("/task-instances/{id}/complete", taskHandler.Complete).Methods(http.MethodPost)
+	api.HandleFunc("/task-instances/{id}/comments", taskExtHandler.ListComments).Methods(http.MethodGet)
+	api.HandleFunc("/task-instances/{id}/comments", taskExtHandler.AddComment).Methods(http.MethodPost)
+	api.HandleFunc("/task-instances/{id}/attachment", taskExtHandler.UploadAttachment).Methods(http.MethodPost)
+	api.HandleFunc("/task-instances/{id}/attachment", taskExtHandler.DownloadAttachment).Methods(http.MethodGet)
+	api.HandleFunc("/task-instances/{id}/attachment", taskExtHandler.DeleteAttachment).Methods(http.MethodDelete)
+	api.HandleFunc("/workflow-instances/{id}/tasks", taskExtHandler.CreateAdhoc).Methods(http.MethodPost)
 	api.HandleFunc("/task-types", taskHandler.ListTaskTypes).Methods(http.MethodGet)
 
 	// Health

@@ -6,9 +6,9 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
-	"github.com/workflow-engine/backend/internal/api/dto"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/service"
+	"workflow-engine/backend/internal/api/dto"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/service"
 )
 
 type TaskHandler struct {
@@ -108,16 +108,20 @@ func (h *TaskHandler) ListTaskTypes(w http.ResponseWriter, r *http.Request) {
 
 func toTaskResponse(t *model.TaskInstance) *dto.TaskInstanceResponse {
 	return &dto.TaskInstanceResponse{
-		ID:                 t.ID.String(),
-		WorkflowInstanceID: t.WorkflowInstanceID.String(),
-		StateID:            t.StateID,
-		TaskKey:            t.TaskKey,
-		TaskLabel:          t.TaskLabel,
-		TaskType:           t.TaskType,
-		Status:             string(t.Status),
-		Outcome:            t.Outcome,
-		CreatedBy:          t.CreatedBy,
-		CreatedAt:          t.CreatedAt,
-		CompletedAt:        t.CompletedAt,
+		ID:                     t.ID.String(),
+		WorkflowInstanceID:     t.WorkflowInstanceID.String(),
+		StateID:                t.StateID,
+		TaskKey:                t.TaskKey,
+		TaskLabel:              t.TaskLabel,
+		TaskType:               t.TaskType,
+		Status:                 string(t.Status),
+		Outcome:                t.Outcome,
+		CreatedBy:              t.CreatedBy,
+		CreatedAt:              t.CreatedAt,
+		CompletedAt:            t.CompletedAt,
+		Priority:               t.Priority,
+		ExpectedCompletionDate: t.ExpectedCompletionDate,
+		ExpectedCompletionTime: t.ExpectedCompletionTime,
+		IsAdhoc:                t.IsAdhoc,
 	}
 }

@@ -12,13 +12,14 @@ import (
 
 	_ "github.com/lib/pq"
 	"github.com/sirupsen/logrus"
-	"github.com/workflow-engine/backend/internal/api"
-	"github.com/workflow-engine/backend/internal/config"
-	"github.com/workflow-engine/backend/internal/engine"
-	"github.com/workflow-engine/backend/internal/repository"
-	"github.com/workflow-engine/backend/internal/service"
-	"github.com/workflow-engine/backend/internal/webhook"
-	"github.com/workflow-engine/backend/internal/workflowloader"
+	"workflow-engine/backend/internal/api"
+	"workflow-engine/backend/internal/config"
+	"workflow-engine/backend/internal/engine"
+	"workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/service"
+	"workflow-engine/backend/internal/storage"
+	"workflow-engine/backend/internal/webhook"
+	"workflow-engine/backend/internal/workflowloader"
 )
 
 func main() {
@@ -39,6 +40,19 @@ func main() {
 	}
 	log.Info("database connected")
 
+	// File storage
+	var fileStore storage.FileStore
+	if cfg.S3Enabled {
+		s3Store, err := storage.NewS3Store(cfg)
+		if err != nil {
+			log.WithField("err", err).Fatal("failed to init S3 storage")
+		}
+		fileStore = s3Store
+		log.Info("S3 file store enabled")
+	} else {
+		fileStore = storage.NewNoopStore()
+		log.Info("file storage disabled (S3_ENABLED=false)")
+	}
 	// Repos
 	defRepo := repository.NewWorkflowDefRepo(db)
 	instRepo := repository.NewWorkflowInstanceRepo(db)
@@ -71,14 +85,22 @@ func main() {
 		"warnings": len(result.Warnings),
 	}).Info("workflow definitions loaded at startup")
 
+	// Repos for task extensions
+	commentRepo := repository.NewTaskCommentRepo(db)
+	attRepo := repository.NewTaskAttachmentRepo(db)
+
 	// Engine + services
 	eng := engine.New(db, defRepo, instRepo, taskRepo, transRepo, log)
 	defSvc := service.NewWorkflowDefService(defRepo, instRepo, loader, log)
 	instSvc := service.NewInstanceService(eng, instRepo, taskRepo, transRepo, log)
 	taskSvc := service.NewTaskService(eng, taskRepo, log)
+	taskSvc.SetInstRepo(instRepo)
+	taskSvc.SetDefRepo(defRepo)
+	commentSvc := service.NewCommentService(commentRepo, log)
+	attSvc := service.NewAttachmentService(fileStore, attRepo, log)
 
 	// Router
-	handler := api.NewRouter(db, defSvc, instSvc, taskSvc, log, cfg.CORSAllowedOrigins)
+	handler := api.NewRouter(db, defSvc, instSvc, taskSvc, commentSvc, attSvc, log, cfg.CORSAllowedOrigins)
 	srv := &http.Server{
 		Addr:         cfg.HTTPAddr,
 		Handler:      handler,

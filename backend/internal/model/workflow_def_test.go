@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/model"
 )
 
 func linearDef() model.WorkflowDefinition {

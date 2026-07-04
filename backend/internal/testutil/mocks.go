@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/workflow-engine/backend/internal/model"
-	"github.com/workflow-engine/backend/internal/repository"
+	"workflow-engine/backend/internal/model"
+	"workflow-engine/backend/internal/repository"
 )
 
 // MockWorkflowDefRepo is a hand-written mock for WorkflowDefRepo.
@@ -110,18 +110,26 @@ func (m *MockWorkflowInstanceRepo) WithTx(tx repository.DB) repository.WorkflowI
 
 // MockTaskInstanceRepo is a hand-written mock for TaskInstanceRepo.
 type MockTaskInstanceRepo struct {
-	BulkCreateFn              func(ctx context.Context, tasks []*model.TaskInstance) error
-	GetByIDFn                 func(ctx context.Context, id uuid.UUID) (*model.TaskInstance, error)
-	ListByInstanceFn          func(ctx context.Context, instanceID uuid.UUID, statusFilter []model.TaskStatus) ([]*model.TaskInstance, error)
-	ListByInstanceAndStateFn  func(ctx context.Context, instanceID uuid.UUID, stateID string) ([]*model.TaskInstance, error)
-	UpdateStatusFn            func(ctx context.Context, id uuid.UUID, status model.TaskStatus, completedAt *time.Time) error
-	UpdateOutcomeFn           func(ctx context.Context, id uuid.UUID, outcome string, data []byte) error
-	SoftDeleteFn              func(ctx context.Context, id uuid.UUID) error
+	BulkCreateFn             func(ctx context.Context, tasks []*model.TaskInstance) error
+	CreateFn                 func(ctx context.Context, task *model.TaskInstance) error
+	GetByIDFn                func(ctx context.Context, id uuid.UUID) (*model.TaskInstance, error)
+	ListByInstanceFn         func(ctx context.Context, instanceID uuid.UUID, statusFilter []model.TaskStatus) ([]*model.TaskInstance, error)
+	ListByInstanceAndStateFn func(ctx context.Context, instanceID uuid.UUID, stateID string) ([]*model.TaskInstance, error)
+	UpdateStatusFn           func(ctx context.Context, id uuid.UUID, status model.TaskStatus, completedAt *time.Time) error
+	UpdateOutcomeFn          func(ctx context.Context, id uuid.UUID, outcome string, data []byte) error
+	UpdateFieldsFn           func(ctx context.Context, id uuid.UUID, patch repository.TaskInstancePatch) error
+	SoftDeleteFn             func(ctx context.Context, id uuid.UUID) error
 }
 
 func (m *MockTaskInstanceRepo) BulkCreate(ctx context.Context, tasks []*model.TaskInstance) error {
 	if m.BulkCreateFn != nil {
 		return m.BulkCreateFn(ctx, tasks)
+	}
+	return nil
+}
+func (m *MockTaskInstanceRepo) Create(ctx context.Context, task *model.TaskInstance) error {
+	if m.CreateFn != nil {
+		return m.CreateFn(ctx, task)
 	}
 	return nil
 }
@@ -155,6 +163,12 @@ func (m *MockTaskInstanceRepo) UpdateOutcome(ctx context.Context, id uuid.UUID, 
 	}
 	return nil
 }
+func (m *MockTaskInstanceRepo) UpdateFields(ctx context.Context, id uuid.UUID, patch repository.TaskInstancePatch) error {
+	if m.UpdateFieldsFn != nil {
+		return m.UpdateFieldsFn(ctx, id, patch)
+	}
+	return nil
+}
 func (m *MockTaskInstanceRepo) SoftDelete(ctx context.Context, id uuid.UUID) error {
 	if m.SoftDeleteFn != nil {
 		return m.SoftDeleteFn(ctx, id)
@@ -162,6 +176,53 @@ func (m *MockTaskInstanceRepo) SoftDelete(ctx context.Context, id uuid.UUID) err
 	return nil
 }
 func (m *MockTaskInstanceRepo) WithTx(tx repository.DB) repository.TaskInstanceRepo { return m }
+
+// MockTaskCommentRepo is a hand-written mock for TaskCommentRepo.
+type MockTaskCommentRepo struct {
+	AddFn        func(ctx context.Context, comment *model.TaskComment) error
+	ListByTaskFn func(ctx context.Context, taskID uuid.UUID) ([]*model.TaskComment, error)
+}
+
+func (m *MockTaskCommentRepo) Add(ctx context.Context, comment *model.TaskComment) error {
+	if m.AddFn != nil {
+		return m.AddFn(ctx, comment)
+	}
+	return nil
+}
+func (m *MockTaskCommentRepo) ListByTask(ctx context.Context, taskID uuid.UUID) ([]*model.TaskComment, error) {
+	if m.ListByTaskFn != nil {
+		return m.ListByTaskFn(ctx, taskID)
+	}
+	return nil, nil
+}
+func (m *MockTaskCommentRepo) WithTx(tx repository.DB) repository.TaskCommentRepo { return m }
+
+// MockTaskAttachmentRepo is a hand-written mock for TaskAttachmentRepo.
+type MockTaskAttachmentRepo struct {
+	UpsertFn         func(ctx context.Context, att *model.TaskAttachment) error
+	GetByTaskIDFn    func(ctx context.Context, taskID uuid.UUID) (*model.TaskAttachment, error)
+	DeleteByTaskIDFn func(ctx context.Context, taskID uuid.UUID) error
+}
+
+func (m *MockTaskAttachmentRepo) Upsert(ctx context.Context, att *model.TaskAttachment) error {
+	if m.UpsertFn != nil {
+		return m.UpsertFn(ctx, att)
+	}
+	return nil
+}
+func (m *MockTaskAttachmentRepo) GetByTaskID(ctx context.Context, taskID uuid.UUID) (*model.TaskAttachment, error) {
+	if m.GetByTaskIDFn != nil {
+		return m.GetByTaskIDFn(ctx, taskID)
+	}
+	return nil, repository.ErrNotFound
+}
+func (m *MockTaskAttachmentRepo) DeleteByTaskID(ctx context.Context, taskID uuid.UUID) error {
+	if m.DeleteByTaskIDFn != nil {
+		return m.DeleteByTaskIDFn(ctx, taskID)
+	}
+	return nil
+}
+func (m *MockTaskAttachmentRepo) WithTx(tx repository.DB) repository.TaskAttachmentRepo { return m }
 
 // MockStateTransitionRepo is a hand-written mock for StateTransitionRepo.
 type MockStateTransitionRepo struct {
